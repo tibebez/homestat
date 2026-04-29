@@ -170,7 +170,7 @@ async function main() {
 
   const detailsHint = new TextRenderable(renderer, {
     id: "details-hint",
-    content: "Arrow keys to move • Enter to open",
+    content: "Arrow keys to move • Enter to open • Ctrl+C to quit",
     fg: COLORS.muted,
   });
 
@@ -292,7 +292,30 @@ async function main() {
 
   void refreshHealth();
 
+  const stop = () => {
+    if (stopped) {
+      return;
+    }
+
+    stopped = true;
+    clearInterval(healthInterval);
+    clearInterval(relativeInterval);
+
+    renderer.destroy();
+  };
+
+  const exitGracefully = () => {
+    stop();
+    process.exit(0);
+  };
+
   renderer.keyInput.on("keypress", (event: KeyEvent) => {
+    if (event.ctrl && event.name === "c") {
+      event.preventDefault();
+      exitGracefully();
+      return;
+    }
+
     if (event.name === "up") {
       selectedIndex = (selectedIndex - 1 + services.length) % services.length;
       safeRender();
@@ -315,22 +338,7 @@ async function main() {
     }
   });
 
-  const stop = () => {
-    if (stopped) {
-      return;
-    }
-
-    stopped = true;
-    clearInterval(healthInterval);
-    clearInterval(relativeInterval);
-
-    renderer.destroy();
-  };
-
-  process.once("SIGINT", () => {
-    stop();
-    process.exit(0);
-  });
+  process.once("SIGINT", exitGracefully);
 
   process.once("exit", stop);
 }
