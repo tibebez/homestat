@@ -29,14 +29,6 @@ function truncate(value: string, length: number): string {
   return `${value.slice(0, Math.max(0, length - 1))}…`;
 }
 
-function pad(value: string, width: number): string {
-  if (value.length >= width) {
-    return value;
-  }
-
-  return `${value}${" ".repeat(width - value.length)}`;
-}
-
 function flattenServices(config: Awaited<ReturnType<typeof loadConfig>>): FlatService[] {
   return config.groups.flatMap((group) =>
     group.services.map((service) => ({
@@ -104,7 +96,22 @@ async function main() {
     border: true,
     title: "Services",
     padding: 1,
-    gap: 0,
+  });
+
+  const cardsViewport = new BoxRenderable(renderer, {
+    id: "cards-viewport",
+    width: "100%",
+    height: "100%",
+    overflow: "hidden",
+  });
+
+  const cardsGrid = new BoxRenderable(renderer, {
+    id: "cards-grid",
+    width: "100%",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "flex-start",
+    gap: 1,
   });
 
   const detailsPanel = new BoxRenderable(renderer, {
@@ -117,20 +124,66 @@ async function main() {
     gap: 0,
   });
 
-  const header = new TextRenderable(renderer, {
-    id: "header",
-    content: "   Icon Name                 URL                                    Health Error",
-    fg: COLORS.muted,
-  });
+  const CARD_COLUMNS = 2;
+  const CARD_HEIGHT = 7;
+  const CARD_ROW_STRIDE = CARD_HEIGHT + 1;
 
   const rowTexts = services.map(
     (_, index) =>
-      new TextRenderable(renderer, {
+      new BoxRenderable(renderer, {
         id: `service-row-${index}`,
+        width: "48%",
+        height: CARD_HEIGHT,
+        padding: 1,
+        border: true,
+        flexDirection: "column",
+        justifyContent: "space-between",
+      }),
+  );
+
+  const cardMainTexts = services.map(
+    (_, index) =>
+      new TextRenderable(renderer, {
+        id: `service-main-${index}`,
         content: "",
         fg: COLORS.text,
       }),
   );
+
+  const cardStatusTexts = services.map(
+    (_, index) =>
+      new TextRenderable(renderer, {
+        id: `service-status-${index}`,
+        content: "",
+        fg: COLORS.unknown,
+      }),
+  );
+
+  const addNewCard = new BoxRenderable(renderer, {
+    id: `service-row-add-new`,
+    width: "48%",
+    height: CARD_HEIGHT,
+    padding: 1,
+    border: true,
+    flexDirection: "column",
+    justifyContent: "center",
+    alignItems: "center",
+  });
+
+  const addNewText = new TextRenderable(renderer, {
+    id: "add-new-text",
+    content: "+ Add Service",
+    fg: COLORS.text,
+  });
+
+  const addNewHint = new TextRenderable(renderer, {
+    id: "add-new-hint",
+    content: "(coming soon)",
+    fg: COLORS.muted,
+  });
+
+  addNewCard.add(addNewText);
+  addNewCard.add(addNewHint);
 
   const detailsTitle = new TextRenderable(renderer, {
     id: "details-title",
@@ -170,7 +223,7 @@ async function main() {
 
   const detailsHint = new TextRenderable(renderer, {
     id: "details-hint",
-    content: "Arrow keys to move • Enter to open • Ctrl+C to quit",
+    content: "←/→/↑/↓ navigate • Enter to open • Ctrl+C quit",
     fg: COLORS.muted,
   });
 
@@ -178,10 +231,15 @@ async function main() {
   root.add(servicesPanel);
   root.add(detailsPanel);
 
-  servicesPanel.add(header);
-  for (const rowText of rowTexts) {
-    servicesPanel.add(rowText);
+  servicesPanel.add(cardsViewport);
+  cardsViewport.add(cardsGrid);
+
+  for (const [index, rowText] of rowTexts.entries()) {
+    cardsGrid.add(rowText);
+    rowText.add(cardMainTexts[index]);
+    rowText.add(cardStatusTexts[index]);
   }
+  cardsGrid.add(addNewCard);
 
   detailsPanel.add(detailsTitle);
   detailsPanel.add(detailsGroup);
@@ -193,6 +251,7 @@ async function main() {
 
   const health = services.map(() => createInitialHealth());
   let selectedIndex = 0;
+  let scrollRowOffset = 0;
 
   const statusText = (state: ServiceHealth["state"]): string => {
     if (state === "online") {
@@ -221,28 +280,58 @@ async function main() {
   const render = () => {
     for (const [index, row] of services.entries()) {
       const rowHealth = health[index];
-      const focusMark = index === selectedIndex ? "▸" : " ";
-      const icon = pad(row.service.icon ?? "•", 2);
-      const name = pad(truncate(row.service.name, 20), 20);
-      const url = pad(truncate(row.service.url, 38), 38);
-      const badge = pad(statusText(rowHealth.state), 7);
-      const code = truncate(rowHealth.errorCode ?? "-", 8);
+      const icon = row.service.icon ?? "•";
+      const name = truncate(row.service.name, 22);
+      const url = truncate(row.service.url, 32);
+      const badge = statusText(rowHealth.state);
+      const code = truncate(rowHealth.errorCode ?? "none", 16);
+      const focused = index === selectedIndex;
 
-      rowTexts[index].content = `${focusMark} ${icon} ${name} ${url} ${badge} ${code}`;
-      rowTexts[index].fg = index === selectedIndex ? COLORS.focused : statusColor(rowHealth.state);
+      cardMainTexts[index].content = `${icon} ${name}\n${url}`;
+      cardMainTexts[index].fg = focused ? COLORS.focused : COLORS.text;
+      cardStatusTexts[index].content = `${badge} • ${code}`;
+      cardStatusTexts[index].fg = statusColor(rowHealth.state);
+      rowTexts[index].borderStyle = focused ? "double" : "single";
     }
 
-    const selected = services[selectedIndex];
-    const selectedHealth = health[selectedIndex];
+    const selectedRow = Math.floor(selectedIndex / CARD_COLUMNS);
+    const visibleRows = Math.max(1, Math.floor(cardsViewport.height / CARD_ROW_STRIDE));
 
-    detailsTitle.content = `${selected.service.icon ?? "•"} ${selected.service.name}`;
-    detailsGroup.content = `Group: ${selected.groupName}`;
-    detailsUrl.content = `URL: ${selected.service.url}`;
-    detailsHealth.content = `Health: ${statusText(selectedHealth.state)}`;
-    detailsChecked.content = `Last checked: ${relativeTime(selectedHealth.lastCheckedAt)}`;
-    detailsError.content = `Error: ${selectedHealth.errorDetails ?? "none"}`;
+    if (selectedRow < scrollRowOffset) {
+      scrollRowOffset = selectedRow;
+    } else if (selectedRow >= scrollRowOffset + visibleRows) {
+      scrollRowOffset = selectedRow - visibleRows + 1;
+    }
 
-    detailsHealth.fg = statusColor(selectedHealth.state);
+    cardsGrid.translateY = -(scrollRowOffset * CARD_ROW_STRIDE);
+
+    if (selectedIndex === services.length) {
+      addNewText.fg = COLORS.focused;
+      addNewHint.fg = COLORS.focused;
+      addNewCard.borderStyle = "double";
+
+      detailsTitle.content = "+ Add New Service";
+      detailsGroup.content = "Create service editor coming soon";
+      detailsUrl.content = "";
+      detailsHealth.content = "";
+      detailsChecked.content = "";
+      detailsError.content = "";
+    } else {
+      addNewText.fg = COLORS.text;
+      addNewHint.fg = COLORS.muted;
+      addNewCard.borderStyle = "single";
+
+      const selected = services[selectedIndex];
+      const selectedHealth = health[selectedIndex];
+
+      detailsTitle.content = `${selected.service.icon ?? "•"} ${selected.service.name}`;
+      detailsGroup.content = `Group: ${selected.groupName}`;
+      detailsUrl.content = `URL: ${selected.service.url}`;
+      detailsHealth.content = `Health: ${statusText(selectedHealth.state)}`;
+      detailsChecked.content = `Last checked: ${relativeTime(selectedHealth.lastCheckedAt)}`;
+      detailsError.content = `Error: ${selectedHealth.errorDetails ?? "none"}`;
+      detailsHealth.fg = statusColor(selectedHealth.state);
+    }
   };
 
   let stopped = false;
@@ -316,21 +405,41 @@ async function main() {
       return;
     }
 
+    if (event.name === "left") {
+      selectedIndex = (selectedIndex - 1 + services.length + 1) % (services.length + 1);
+      safeRender();
+      event.preventDefault();
+      return;
+    }
+
+    if (event.name === "right") {
+      selectedIndex = (selectedIndex + 1) % (services.length + 1);
+      safeRender();
+      event.preventDefault();
+      return;
+    }
+
     if (event.name === "up") {
-      selectedIndex = (selectedIndex - 1 + services.length) % services.length;
+      selectedIndex = (selectedIndex - CARD_COLUMNS + services.length + 1) % (services.length + 1);
       safeRender();
       event.preventDefault();
       return;
     }
 
     if (event.name === "down") {
-      selectedIndex = (selectedIndex + 1) % services.length;
+      selectedIndex = (selectedIndex + CARD_COLUMNS) % (services.length + 1);
       safeRender();
       event.preventDefault();
       return;
     }
 
     if (event.name === "return" || event.name === "enter") {
+      if (selectedIndex === services.length) {
+        // "Add New Service" clicked, do nothing for now as requested
+        event.preventDefault();
+        return;
+      }
+      
       const selected = services[selectedIndex];
       const normalized = normalizeServiceUrl(selected.service.url);
       void open(normalized);

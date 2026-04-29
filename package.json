@@ -1,16 +1,16 @@
 {
   "name": "homestat",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Terminal homepage dashboard for self-hosted services.",
-  "homepage": "https://github.com/author/library#readme",
+  "homepage": "https://github.com/tibebez/homestat#readme",
   "bugs": {
-    "url": "https://github.com/author/library/issues"
+    "url": "https://github.com/tibebez/homestat/issues"
   },
   "license": "MIT",
-  "author": "Author Name <author.name@mail.com>",
+  "author": "Tibebe",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/author/library.git"
+    "url": "git+https://github.com/tibebez/homestat.git"
   },
   "files": [
     "dist"
