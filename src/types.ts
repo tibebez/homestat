@@ -4,20 +4,11 @@ export interface Service {
   name: string;
   url: string;
   icon?: string;
-}
-
-export interface Group {
-  name: string;
-  services: Service[];
+  description?: string;
 }
 
 export interface Config {
-  groups: Group[];
-}
-
-export interface FlatService {
-  groupName: string;
-  service: Service;
+  services: Service[];
 }
 
 export interface ServiceHealth {

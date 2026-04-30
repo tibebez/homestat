@@ -1,8 +1,7 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import type { Config } from "./types.ts";
+import type { Config, Service } from "./types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".homestat", "config.json");
 
@@ -11,44 +10,24 @@ function assertConfig(data: unknown): asserts data is Config {
     throw new Error("Config must be an object.");
   }
 
-  const groups = (data as { groups?: unknown }).groups;
-  if (!Array.isArray(groups)) {
-    throw new Error("Config must include a groups array.");
+  const services = (data as { services?: unknown }).services;
+  if (!Array.isArray(services)) {
+    throw new Error("Config must include a services array.");
   }
 
-  for (const [groupIndex, group] of groups.entries()) {
-    if (!group || typeof group !== "object") {
-      throw new Error(`Group at index ${groupIndex} must be an object.`);
+  for (const [index, service] of services.entries()) {
+    if (!service || typeof service !== "object") {
+      throw new Error(`Service at index ${index} must be an object.`);
     }
 
-    const groupName = (group as { name?: unknown }).name;
-    if (typeof groupName !== "string" || !groupName.trim()) {
-      throw new Error(`Group at index ${groupIndex} must include a non-empty name.`);
+    const name = (service as { name?: unknown }).name;
+    const url = (service as { url?: unknown }).url;
+    if (typeof name !== "string" || !name.trim()) {
+      throw new Error(`Service at index ${index} must have a non-empty name.`);
     }
 
-    const services = (group as { services?: unknown }).services;
-    if (!Array.isArray(services)) {
-      throw new Error(`Group '${groupName}' must include a services array.`);
-    }
-
-    for (const [serviceIndex, service] of services.entries()) {
-      if (!service || typeof service !== "object") {
-        throw new Error(
-          `Service at index ${serviceIndex} in group '${groupName}' must be an object.`,
-        );
-      }
-
-      const name = (service as { name?: unknown }).name;
-      const url = (service as { url?: unknown }).url;
-      if (typeof name !== "string" || !name.trim()) {
-        throw new Error(
-          `Service at index ${serviceIndex} in group '${groupName}' must have a non-empty name.`,
-        );
-      }
-
-      if (typeof url !== "string" || !url.trim()) {
-        throw new Error(`Service '${name}' in group '${groupName}' must have a non-empty url.`);
-      }
+    if (typeof url !== "string" || !url.trim()) {
+      throw new Error(`Service '${name}' must have a non-empty url.`);
     }
   }
 }
@@ -85,6 +64,35 @@ export async function loadConfig(path = CONFIG_PATH): Promise<Config> {
     throw new Error(`Config at ${path} is not valid JSON.`);
   }
 
+  // Auto-migrate old "groups" format to flat "services" format
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "groups" in parsed &&
+    !("services" in parsed)
+  ) {
+    const old = parsed as { groups?: unknown };
+    const groups = Array.isArray(old.groups) ? old.groups : [];
+    const services: Service[] = [];
+
+    for (const group of groups) {
+      if (group && typeof group === "object" && "services" in group) {
+        const groupServices = (group as { services?: unknown }).services;
+        if (Array.isArray(groupServices)) {
+          for (const svc of groupServices) {
+            if (svc && typeof svc === "object") {
+              services.push(svc as Service);
+            }
+          }
+        }
+      }
+    }
+
+    const migrated: Config = { services };
+    await saveConfig(migrated, path);
+    return migrated;
+  }
+
   assertConfig(parsed);
-  return parsed;
+  return parsed as Config;
 }

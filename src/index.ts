@@ -7,4 +7,4 @@ export {
   HEALTH_CHECK_INTERVAL_MS,
   HEALTH_CHECK_TIMEOUT_MS,
 } from "./health.ts";
-export type { Config, FlatService, Group, HealthState, Service, ServiceHealth } from "./types.ts";
+export type { Config, HealthState, Service, ServiceHealth } from "./types.ts";
