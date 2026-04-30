@@ -1,7 +1,7 @@
 import "@opentui/core/runtime-plugin-support";
 import { BoxRenderable, createCliRenderer, type KeyEvent, TextRenderable } from "@opentui/core";
 import open from "open";
-import { loadConfig } from "./config.ts";
+import { loadConfig, saveConfig } from "./config.ts";
 import {
   createInitialHealth,
   evaluateStatus,
@@ -10,7 +10,7 @@ import {
   normalizeServiceUrl,
   relativeTime,
 } from "./health.ts";
-import type { FlatService, ServiceHealth } from "./types.ts";
+import type { FlatService, Service, ServiceHealth } from "./types.ts";
 
 const COLORS = {
   online: "#86efac",
@@ -27,6 +27,19 @@ function truncate(value: string, length: number): string {
   }
 
   return `${value.slice(0, Math.max(0, length - 1))}…`;
+}
+
+function formFieldLine(
+  label: string,
+  value: string,
+  focused: boolean,
+  panelWidth: number,
+): string {
+  const prefix = `${focused ? "> " : "  "}${label}: `;
+  const contentWidth = Math.max(10, panelWidth - 4);
+  const maxValueLen = Math.max(3, contentWidth - prefix.length - (focused ? 1 : 0));
+  const displayValue = truncate(value, maxValueLen) + (focused ? "|" : "");
+  return `${prefix}${displayValue}`;
 }
 
 function flattenServices(config: Awaited<ReturnType<typeof loadConfig>>): FlatService[] {
@@ -197,6 +210,12 @@ async function main() {
     fg: COLORS.muted,
   });
 
+  const formGroupName = new TextRenderable(renderer, {
+    id: "form-group-name",
+    content: "",
+    fg: COLORS.text,
+  });
+
   const detailsUrl = new TextRenderable(renderer, {
     id: "details-url",
     content: "",
@@ -243,6 +262,7 @@ async function main() {
 
   detailsPanel.add(detailsTitle);
   detailsPanel.add(detailsGroup);
+  detailsPanel.add(formGroupName);
   detailsPanel.add(detailsUrl);
   detailsPanel.add(detailsHealth);
   detailsPanel.add(detailsChecked);
@@ -252,6 +272,120 @@ async function main() {
   const health = services.map(() => createInitialHealth());
   let selectedIndex = 0;
   let scrollRowOffset = 0;
+
+  let isFormActive = false;
+  const formFields = {
+    groupIndex: config.groups.length > 0 ? 0 : ("new" as const),
+    groupName: "",
+    serviceName: "",
+    url: "",
+    icon: "•",
+  };
+  let focusedFieldIndex = 0;
+  let formError = "";
+  let isSubmitting = false;
+
+  function resetForm() {
+    formFields.groupIndex = config.groups.length > 0 ? 0 : "new";
+    formFields.groupName = "";
+    formFields.serviceName = "";
+    formFields.url = "";
+    formFields.icon = "•";
+    focusedFieldIndex = 0;
+    formError = "";
+  }
+
+  async function submitForm() {
+    if (isSubmitting) return;
+    isSubmitting = true;
+
+    try {
+      if (formFields.groupIndex === "new" && !formFields.groupName.trim()) {
+        formError = "Error: Group name is required.";
+        safeRender();
+        return;
+      }
+      if (!formFields.serviceName.trim()) {
+        formError = "Error: Service name is required.";
+        safeRender();
+        return;
+      }
+      if (!formFields.url.trim()) {
+        formError = "Error: URL is required.";
+        safeRender();
+        return;
+      }
+
+      const newService: Service = {
+        name: formFields.serviceName.trim(),
+        url: formFields.url.trim(),
+        icon: formFields.icon.trim() || "•",
+      };
+
+      let groupName: string;
+      if (formFields.groupIndex === "new") {
+        groupName = formFields.groupName.trim();
+        config.groups.push({ name: groupName, services: [newService] });
+      } else {
+        const group = config.groups[formFields.groupIndex as number];
+        group.services.push(newService);
+        groupName = group.name;
+      }
+
+      await saveConfig(config);
+
+      const flatService: FlatService = { groupName, service: newService };
+      services.push(flatService);
+
+      const newIndex = services.length - 1;
+      const newRowText = new BoxRenderable(renderer, {
+        id: `service-row-${newIndex}`,
+        width: "48%",
+        height: CARD_HEIGHT,
+        padding: 1,
+        border: true,
+        flexDirection: "column",
+        justifyContent: "space-between",
+      });
+      const newCardMain = new TextRenderable(renderer, {
+        id: `service-main-${newIndex}`,
+        content: "",
+        fg: COLORS.text,
+      });
+      const newCardStatus = new TextRenderable(renderer, {
+        id: `service-status-${newIndex}`,
+        content: "",
+        fg: COLORS.unknown,
+      });
+
+      newRowText.add(newCardMain);
+      newRowText.add(newCardStatus);
+      cardsGrid.insertBefore(newRowText, addNewCard);
+
+      rowTexts.push(newRowText);
+      cardMainTexts.push(newCardMain);
+      cardStatusTexts.push(newCardStatus);
+      health.push(createInitialHealth());
+
+      isFormActive = false;
+      selectedIndex = newIndex;
+      formError = "";
+
+      safeRender();
+
+      void checkService(newService.url).then((result) => {
+        health[newIndex] = {
+          state: result.state,
+          errorCode: result.errorCode,
+          errorDetails: result.errorDetails,
+          lastCheckedAt: Date.now(),
+        };
+        safeRender();
+      });
+    } finally {
+      isSubmitting = false;
+    }
+  }
 
   const statusText = (state: ServiceHealth["state"]): string => {
     if (state === "online") {
@@ -309,28 +443,112 @@ async function main() {
       addNewText.fg = COLORS.focused;
       addNewHint.fg = COLORS.focused;
       addNewCard.borderStyle = "double";
-
-      detailsTitle.content = "+ Add New Service";
-      detailsGroup.content = "Create service editor coming soon";
-      detailsUrl.content = "";
-      detailsHealth.content = "";
-      detailsChecked.content = "";
-      detailsError.content = "";
     } else {
       addNewText.fg = COLORS.text;
       addNewHint.fg = COLORS.muted;
       addNewCard.borderStyle = "single";
+    }
 
+    if (isFormActive) {
+      const FIELDS = {
+        group: 0,
+        groupName: 1,
+        serviceName: 2,
+        url: 3,
+        icon: 4,
+        save: 5,
+      };
+
+      const pw = detailsPanel.width;
+
+      detailsTitle.content = "+ Add New Service";
+      detailsTitle.fg = COLORS.focused;
+
+      const groupFocused = focusedFieldIndex === FIELDS.group;
+      const groupValue = formFields.groupIndex === "new" ? "+ New Group" : config.groups[formFields.groupIndex].name;
+      detailsGroup.content = formFieldLine("Group", groupValue, groupFocused, pw);
+      detailsGroup.fg = groupFocused ? COLORS.focused : COLORS.text;
+
+      if (formFields.groupIndex === "new") {
+        const groupNameFocused = focusedFieldIndex === FIELDS.groupName;
+        formGroupName.content = formFieldLine("Group Name", formFields.groupName, groupNameFocused, pw);
+        formGroupName.fg = groupNameFocused ? COLORS.focused : COLORS.text;
+      } else {
+        formGroupName.content = "";
+      }
+
+      const serviceNameFocused = focusedFieldIndex === FIELDS.serviceName;
+      detailsUrl.content = formFieldLine("Name", formFields.serviceName, serviceNameFocused, pw);
+      detailsUrl.fg = serviceNameFocused ? COLORS.focused : COLORS.text;
+
+      const urlFocused = focusedFieldIndex === FIELDS.url;
+      detailsHealth.content = formFieldLine("URL", formFields.url, urlFocused, pw);
+      detailsHealth.fg = urlFocused ? COLORS.focused : COLORS.text;
+
+      const iconFocused = focusedFieldIndex === FIELDS.icon;
+      detailsChecked.content = formFieldLine("Icon", formFields.icon, iconFocused, pw);
+      detailsChecked.fg = iconFocused ? COLORS.focused : COLORS.text;
+
+      if (formError) {
+        const errorPrefix = "Error: ";
+        const contentWidth = Math.max(10, pw - 4);
+        detailsError.content = errorPrefix + truncate(formError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
+        detailsError.fg = COLORS.offline;
+      } else {
+        const saveFocused = focusedFieldIndex === FIELDS.save;
+        detailsError.content = `${saveFocused ? "> " : "  "}[Save]`;
+        detailsError.fg = saveFocused ? COLORS.focused : COLORS.muted;
+      }
+
+      detailsHint.content = "↑/↓ navigate fields • Type to edit • Enter to save • Esc to cancel";
+    } else if (selectedIndex === services.length) {
+      detailsTitle.content = "+ Add New Service";
+      detailsTitle.fg = COLORS.focused;
+      detailsGroup.content = "Create service editor coming soon";
+      detailsGroup.fg = COLORS.muted;
+      detailsUrl.content = "";
+      detailsUrl.fg = COLORS.text;
+      detailsHealth.content = "";
+      detailsHealth.fg = COLORS.text;
+      detailsChecked.content = "";
+      detailsChecked.fg = COLORS.text;
+      detailsError.content = "";
+      detailsError.fg = COLORS.text;
+      detailsHint.content = "←/→/↑/↓ navigate • Enter to open • Ctrl+C quit";
+      formGroupName.content = "";
+    } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
+      const pw = detailsPanel.width;
+      const contentWidth = Math.max(10, pw - 4);
 
-      detailsTitle.content = `${selected.service.icon ?? "•"} ${selected.service.name}`;
-      detailsGroup.content = `Group: ${selected.groupName}`;
-      detailsUrl.content = `URL: ${selected.service.url}`;
-      detailsHealth.content = `Health: ${statusText(selectedHealth.state)}`;
-      detailsChecked.content = `Last checked: ${relativeTime(selectedHealth.lastCheckedAt)}`;
-      detailsError.content = `Error: ${selectedHealth.errorDetails ?? "none"}`;
+      const titlePrefix = `${selected.service.icon ?? "•"} `;
+      detailsTitle.content = titlePrefix + truncate(selected.service.name, Math.max(3, contentWidth - titlePrefix.length));
+      detailsTitle.fg = COLORS.focused;
+
+      const groupPrefix = "Group: ";
+      detailsGroup.content = groupPrefix + truncate(selected.groupName, Math.max(3, contentWidth - groupPrefix.length));
+      detailsGroup.fg = COLORS.muted;
+
+      const urlPrefix = "URL: ";
+      detailsUrl.content = urlPrefix + truncate(selected.service.url, Math.max(3, contentWidth - urlPrefix.length));
+      detailsUrl.fg = COLORS.text;
+
+      const healthPrefix = "Health: ";
+      const healthText = statusText(selectedHealth.state);
+      detailsHealth.content = healthPrefix + healthText;
       detailsHealth.fg = statusColor(selectedHealth.state);
+
+      const checkedPrefix = "Last checked: ";
+      detailsChecked.content = checkedPrefix + truncate(relativeTime(selectedHealth.lastCheckedAt), Math.max(3, contentWidth - checkedPrefix.length));
+      detailsChecked.fg = COLORS.text;
+
+      const errorPrefix = "Error: ";
+      detailsError.content = errorPrefix + truncate(selectedHealth.errorDetails ?? "none", Math.max(3, contentWidth - errorPrefix.length));
+      detailsError.fg = COLORS.text;
+
+      detailsHint.content = "←/→/↑/↓ navigate • Enter to open • Ctrl+C quit";
+      formGroupName.content = "";
     }
   };
 
@@ -398,10 +616,116 @@ async function main() {
     process.exit(0);
   };
 
+  const isTextField = (index: number): boolean =>
+    index === 1 || index === 2 || index === 3 || index === 4;
+
+  const nextField = (): void => {
+    const max = 5;
+    do {
+      focusedFieldIndex = (focusedFieldIndex + 1) % (max + 1);
+    } while (formFields.groupIndex !== "new" && focusedFieldIndex === 1);
+  };
+
+  const prevField = (): void => {
+    const max = 5;
+    do {
+      focusedFieldIndex = (focusedFieldIndex - 1 + max + 1) % (max + 1);
+    } while (formFields.groupIndex !== "new" && focusedFieldIndex === 1);
+  };
+
   renderer.keyInput.on("keypress", (event: KeyEvent) => {
     if (event.ctrl && event.name === "c") {
       event.preventDefault();
       exitGracefully();
+      return;
+    }
+
+    if (isFormActive) {
+      formError = "";
+
+      if (event.name === "escape") {
+        isFormActive = false;
+        selectedIndex = services.length;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "up") {
+        prevField();
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "down") {
+        nextField();
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "return" || event.name === "enter") {
+        if (focusedFieldIndex === 0) {
+          if (formFields.groupIndex === "new") {
+            formFields.groupIndex = 0;
+          } else if (formFields.groupIndex === config.groups.length - 1) {
+            formFields.groupIndex = "new";
+          } else {
+            formFields.groupIndex = (formFields.groupIndex as number) + 1;
+          }
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+
+        if (focusedFieldIndex === 5) {
+          void submitForm();
+          event.preventDefault();
+          return;
+        }
+      }
+
+      if (event.name === "backspace") {
+        if (isTextField(focusedFieldIndex)) {
+          if (focusedFieldIndex === 1) {
+            formFields.groupName = formFields.groupName.slice(0, -1);
+          } else if (focusedFieldIndex === 2) {
+            formFields.serviceName = formFields.serviceName.slice(0, -1);
+          } else if (focusedFieldIndex === 3) {
+            formFields.url = formFields.url.slice(0, -1);
+          } else if (focusedFieldIndex === 4) {
+            formFields.icon = formFields.icon.slice(0, -1);
+          }
+          safeRender();
+        }
+        event.preventDefault();
+        return;
+      }
+
+      if (
+        event.sequence.length === 1 &&
+        event.sequence.charCodeAt(0) >= 32 &&
+        !event.ctrl &&
+        !event.meta
+      ) {
+        if (isTextField(focusedFieldIndex)) {
+          if (focusedFieldIndex === 1) {
+            formFields.groupName += event.sequence;
+          } else if (focusedFieldIndex === 2) {
+            formFields.serviceName += event.sequence;
+          } else if (focusedFieldIndex === 3) {
+            formFields.url += event.sequence;
+          } else if (focusedFieldIndex === 4) {
+            formFields.icon += event.sequence;
+          }
+          safeRender();
+        }
+        event.preventDefault();
+        return;
+      }
+
+      event.preventDefault();
       return;
     }
 
@@ -435,11 +759,13 @@ async function main() {
 
     if (event.name === "return" || event.name === "enter") {
       if (selectedIndex === services.length) {
-        // "Add New Service" clicked, do nothing for now as requested
+        isFormActive = true;
+        resetForm();
+        safeRender();
         event.preventDefault();
         return;
       }
-      
+
       const selected = services[selectedIndex];
       const normalized = normalizeServiceUrl(selected.service.url);
       void open(normalized);

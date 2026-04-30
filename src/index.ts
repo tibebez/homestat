@@ -1,4 +1,4 @@
-export { CONFIG_PATH, loadConfig } from "./config.ts";
+export { CONFIG_PATH, loadConfig, saveConfig } from "./config.ts";
 export {
   createInitialHealth,
   evaluateStatus,

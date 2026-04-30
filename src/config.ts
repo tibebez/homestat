@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { Config } from "./types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".homestat", "config.json");
@@ -50,6 +51,11 @@ function assertConfig(data: unknown): asserts data is Config {
       }
     }
   }
+}
+
+export async function saveConfig(config: Config, path = CONFIG_PATH): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(config, null, 2), "utf8");
 }
 
 export async function loadConfig(path = CONFIG_PATH): Promise<Config> {
