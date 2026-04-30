@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { Config, Service } from "./types.ts";
+import type { Config } from "./types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".homestat", "config.json");
 
@@ -62,35 +62,6 @@ export async function loadConfig(path = CONFIG_PATH): Promise<Config> {
     parsed = JSON.parse(raw);
   } catch {
     throw new Error(`Config at ${path} is not valid JSON.`);
-  }
-
-  // Auto-migrate old "groups" format to flat "services" format
-  if (
-    parsed &&
-    typeof parsed === "object" &&
-    "groups" in parsed &&
-    !("services" in parsed)
-  ) {
-    const old = parsed as { groups?: unknown };
-    const groups = Array.isArray(old.groups) ? old.groups : [];
-    const services: Service[] = [];
-
-    for (const group of groups) {
-      if (group && typeof group === "object" && "services" in group) {
-        const groupServices = (group as { services?: unknown }).services;
-        if (Array.isArray(groupServices)) {
-          for (const svc of groupServices) {
-            if (svc && typeof svc === "object") {
-              services.push(svc as Service);
-            }
-          }
-        }
-      }
-    }
-
-    const migrated: Config = { services };
-    await saveConfig(migrated, path);
-    return migrated;
   }
 
   assertConfig(parsed);

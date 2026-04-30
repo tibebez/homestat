@@ -102,7 +102,7 @@ async function main() {
   const mainArea = new BoxRenderable(renderer, {
     id: "main-area",
     width: "100%",
-    flex: 1,
+    flexGrow: 1,
     flexDirection: "row",
     gap: 1,
   });
@@ -346,8 +346,6 @@ async function main() {
 
       config.services.push(newService);
       await saveConfig(config);
-
-      services.push(newService);
 
       const newIndex = services.length - 1;
       const newRowText = new BoxRenderable(renderer, {
