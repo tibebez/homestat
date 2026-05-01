@@ -5,6 +5,8 @@ export interface Service {
   url: string;
   icon?: string;
   description?: string;
+  containerId?: string;
+  containerName?: string;
 }
 
 export interface Config {

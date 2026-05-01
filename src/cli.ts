@@ -10,6 +10,7 @@ import {
   normalizeServiceUrl,
   relativeTime,
 } from "./health.ts";
+import { getServiceDockerStats, resolveServiceContainer } from "./docker.ts";
 import type { Service, ServiceHealth } from "./types.ts";
 
 const COLORS = {
@@ -74,6 +75,34 @@ async function checkService(
       errorDetails: message,
     };
   }
+}
+
+type RuntimeStatsState = "unknown" | "available" | "unavailable" | "not-applicable";
+
+interface ServiceRuntimeStats {
+  state: RuntimeStatsState;
+  source: "docker" | null;
+  containerName: string | null;
+  cpuUsage: string | null;
+  memoryUsage: string | null;
+  diskUsage: string | null;
+  lastCheckedAt: number | null;
+  errorCode: string | null;
+  errorDetails: string | null;
+}
+
+function createInitialRuntimeStats(): ServiceRuntimeStats {
+  return {
+    state: "unknown",
+    source: null,
+    containerName: null,
+    cpuUsage: null,
+    memoryUsage: null,
+    diskUsage: null,
+    lastCheckedAt: null,
+    errorCode: null,
+    errorDetails: null,
+  };
 }
 
 async function main() {
@@ -270,6 +299,30 @@ async function main() {
     fg: COLORS.text,
   });
 
+  const detailsRuntime = new TextRenderable(renderer, {
+    id: "details-runtime",
+    content: "",
+    fg: COLORS.text,
+  });
+
+  const detailsCpu = new TextRenderable(renderer, {
+    id: "details-cpu",
+    content: "",
+    fg: COLORS.text,
+  });
+
+  const detailsRam = new TextRenderable(renderer, {
+    id: "details-ram",
+    content: "",
+    fg: COLORS.text,
+  });
+
+  const detailsDisk = new TextRenderable(renderer, {
+    id: "details-disk",
+    content: "",
+    fg: COLORS.text,
+  });
+
   renderer.root.add(root);
   root.add(mainArea);
   root.add(footer);
@@ -293,8 +346,13 @@ async function main() {
   detailsPanel.add(detailsHealth);
   detailsPanel.add(detailsChecked);
   detailsPanel.add(detailsError);
+  detailsPanel.add(detailsRuntime);
+  detailsPanel.add(detailsCpu);
+  detailsPanel.add(detailsRam);
+  detailsPanel.add(detailsDisk);
 
   const health = services.map(() => createInitialHealth());
+  const runtimeStats = services.map(() => createInitialRuntimeStats());
   let selectedIndex = 0;
   let scrollRowOffset = 0;
 
@@ -302,6 +360,7 @@ async function main() {
   const formFields = {
     serviceName: "",
     url: "",
+    containerId: "",
     iconIndex: 0,
   };
   let focusedFieldIndex = 0;
@@ -313,6 +372,7 @@ async function main() {
   function resetForm() {
     formFields.serviceName = "";
     formFields.url = "";
+    formFields.containerId = "";
     formFields.iconIndex = 0;
     focusedFieldIndex = 0;
     formError = "";
@@ -324,6 +384,7 @@ async function main() {
     const service = services[index];
     formFields.serviceName = service.name;
     formFields.url = service.url;
+    formFields.containerId = service.containerId ?? "";
     formFields.iconIndex = Math.max(0, ICON_PRESETS.indexOf(service.icon ?? "•"));
     focusedFieldIndex = 0;
     formError = "";
@@ -356,6 +417,7 @@ async function main() {
       const serviceData: Service = {
         name: formFields.serviceName.trim(),
         url: formFields.url.trim(),
+        containerId: formFields.containerId.trim() || undefined,
         icon: ICON_PRESETS[formFields.iconIndex],
       };
 
@@ -368,13 +430,7 @@ async function main() {
         selectedIndex = editingIndex;
         safeRender();
 
-        void checkService(serviceData.url).then((result) => {
-          health[editingIndex] = {
-            state: result.state,
-            errorCode: result.errorCode,
-            errorDetails: result.errorDetails,
-            lastCheckedAt: Date.now(),
-          };
+        void refreshServiceAndDetectContainer(editingIndex).then(() => {
           safeRender();
         });
         return;
@@ -428,6 +484,7 @@ async function main() {
       cardStatusTexts.push(newStatusText);
       cardBottomTexts.push(newBottomText);
       health.push(createInitialHealth());
+      runtimeStats.push(createInitialRuntimeStats());
 
       isFormActive = false;
       selectedIndex = newIndex;
@@ -435,13 +492,7 @@ async function main() {
 
       safeRender();
 
-      void checkService(serviceData.url).then((result) => {
-        health[newIndex] = {
-          state: result.state,
-          errorCode: result.errorCode,
-          errorDetails: result.errorDetails,
-          lastCheckedAt: Date.now(),
-        };
+      void refreshServiceAndDetectContainer(newIndex).then(() => {
         safeRender();
       });
     } finally {
@@ -463,6 +514,7 @@ async function main() {
     cardStatusTexts.splice(index, 1);
     cardBottomTexts.splice(index, 1);
     health.splice(index, 1);
+    runtimeStats.splice(index, 1);
 
     if (selectedIndex > index) {
       selectedIndex--;
@@ -545,8 +597,9 @@ async function main() {
       const FIELDS = {
         serviceName: 0,
         url: 1,
-        icon: 2,
-        save: 3,
+        containerId: 2,
+        icon: 3,
+        save: 4,
       };
 
       detailsTitle.content = formMode === "edit" ? "✎ Edit Service" : "+ Add New Service";
@@ -560,21 +613,32 @@ async function main() {
       detailsHealth.content = formFieldLine("URL", formFields.url, urlFocused, pw);
       detailsHealth.fg = urlFocused ? COLORS.focused : COLORS.text;
 
+      const containerIdFocused = focusedFieldIndex === FIELDS.containerId;
+      detailsChecked.content = formFieldLine("Container ID", formFields.containerId, containerIdFocused, pw);
+      detailsChecked.fg = containerIdFocused ? COLORS.focused : COLORS.text;
+
       const iconFocused = focusedFieldIndex === FIELDS.icon;
-      detailsChecked.content = formFieldLine("Icon", iconDisplay(), iconFocused, pw);
-      detailsChecked.fg = iconFocused ? COLORS.focused : COLORS.text;
+      detailsError.content = formFieldLine("Icon", iconDisplay(), iconFocused, pw);
+      detailsError.fg = iconFocused ? COLORS.focused : COLORS.text;
 
       if (formError) {
         const errorPrefix = "Error: ";
-        detailsError.content = errorPrefix + truncate(formError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
-        detailsError.fg = COLORS.offline;
+        detailsRuntime.content = errorPrefix + truncate(formError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
+        detailsRuntime.fg = COLORS.offline;
       } else {
         const saveFocused = focusedFieldIndex === FIELDS.save;
-        detailsError.content = `${saveFocused ? "> " : "  "}[Save]`;
-        detailsError.fg = saveFocused ? COLORS.focused : COLORS.muted;
+        detailsRuntime.content = `${saveFocused ? "> " : "  "}[Save]`;
+        detailsRuntime.fg = saveFocused ? COLORS.focused : COLORS.muted;
       }
 
-      footerText.content = "↑/↓ navigate fields • Type to edit • Enter to save • Esc to cancel";
+      detailsCpu.content = "";
+      detailsCpu.fg = COLORS.text;
+      detailsRam.content = "";
+      detailsRam.fg = COLORS.text;
+      detailsDisk.content = "";
+      detailsDisk.fg = COLORS.text;
+
+      footerText.content = "↑/↓ navigate fields • ←/→ icon • Type to edit • Enter to save • Esc to cancel";
     } else if (selectedIndex === services.length) {
       detailsTitle.content = "+ Add New Service";
       detailsTitle.fg = COLORS.focused;
@@ -591,10 +655,20 @@ async function main() {
       detailsError.content = "";
       detailsError.fg = COLORS.text;
 
+      detailsRuntime.content = "";
+      detailsRuntime.fg = COLORS.text;
+      detailsCpu.content = "";
+      detailsCpu.fg = COLORS.text;
+      detailsRam.content = "";
+      detailsRam.fg = COLORS.text;
+      detailsDisk.content = "";
+      detailsDisk.fg = COLORS.text;
+
       footerText.content = "←/→/↑/↓ navigate • Enter to add • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
+      const selectedRuntime = runtimeStats[selectedIndex];
 
       const titlePrefix = `${selected.icon ?? "•"} `;
       detailsTitle.content = titlePrefix + truncate(selected.name, Math.max(3, contentWidth - titlePrefix.length));
@@ -617,7 +691,73 @@ async function main() {
       detailsError.content = errorPrefix + truncate(selectedHealth.errorDetails ?? "none", Math.max(3, contentWidth - errorPrefix.length));
       detailsError.fg = COLORS.text;
 
-      footerText.content = "←/→/↑/↓ navigate • o open • e edit • d delete • r refresh • Ctrl+C quit";
+      const runtimePrefix = "Runtime: ";
+      const cpuPrefix = "CPU: ";
+      const ramPrefix = "RAM: ";
+      const diskPrefix = "Disk: ";
+
+      if (selectedRuntime.state === "available") {
+        const runtimeLabel = selectedRuntime.containerName
+          ? `Docker (${selectedRuntime.containerName})`
+          : "Docker";
+        detailsRuntime.content = runtimePrefix + truncate(runtimeLabel, Math.max(3, contentWidth - runtimePrefix.length));
+        detailsRuntime.fg = COLORS.text;
+
+        detailsCpu.content = cpuPrefix + truncate(selectedRuntime.cpuUsage ?? "-", Math.max(3, contentWidth - cpuPrefix.length));
+        detailsCpu.fg = COLORS.text;
+
+        detailsRam.content = ramPrefix + truncate(selectedRuntime.memoryUsage ?? "-", Math.max(3, contentWidth - ramPrefix.length));
+        detailsRam.fg = COLORS.text;
+
+        detailsDisk.content = diskPrefix + truncate(selectedRuntime.diskUsage ?? "-", Math.max(3, contentWidth - diskPrefix.length));
+        detailsDisk.fg = COLORS.text;
+      } else if (selectedRuntime.state === "not-applicable") {
+        detailsRuntime.content = runtimePrefix + truncate("N/A (non-local service)", Math.max(3, contentWidth - runtimePrefix.length));
+        detailsRuntime.fg = COLORS.muted;
+
+        detailsCpu.content = cpuPrefix + "-";
+        detailsCpu.fg = COLORS.muted;
+        detailsRam.content = ramPrefix + "-";
+        detailsRam.fg = COLORS.muted;
+        detailsDisk.content = diskPrefix + "-";
+        detailsDisk.fg = COLORS.muted;
+      } else if (selectedRuntime.state === "unavailable") {
+        const runtimeMessage =
+          selectedRuntime.errorCode === "CONTAINER_NOT_FOUND"
+            ? "No container linked"
+            : selectedRuntime.errorCode === "DOCKER_DAEMON_UNAVAILABLE" || selectedRuntime.errorCode === "DOCKER_NOT_INSTALLED"
+              ? "Docker unavailable"
+              : "Docker stats unavailable";
+
+        detailsRuntime.content = runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
+        detailsRuntime.fg = COLORS.offline;
+
+        detailsCpu.content = cpuPrefix + "-";
+        detailsCpu.fg = COLORS.muted;
+        detailsRam.content = ramPrefix + "-";
+        detailsRam.fg = COLORS.muted;
+        detailsDisk.content = diskPrefix + "-";
+        detailsDisk.fg = COLORS.muted;
+      } else {
+        detailsRuntime.content = runtimePrefix + "loading…";
+        detailsRuntime.fg = COLORS.muted;
+
+        detailsCpu.content = cpuPrefix + "-";
+        detailsCpu.fg = COLORS.muted;
+        detailsRam.content = ramPrefix + "-";
+        detailsRam.fg = COLORS.muted;
+        detailsDisk.content = diskPrefix + "-";
+        detailsDisk.fg = COLORS.muted;
+      }
+
+      const runtimeHint =
+        selectedRuntime.state === "available"
+          ? " • docker stats synced"
+          : selectedRuntime.state === "unavailable"
+            ? " • docker stats unavailable"
+            : "";
+
+      footerText.content = `←/→/↑/↓ navigate • o open • e edit • d delete • r refresh • Ctrl+C quit${runtimeHint}`;
     }
   };
 
@@ -631,22 +771,123 @@ async function main() {
     renderer.requestRender();
   };
 
+  const refreshServiceState = async (index: number) => {
+    const service = services[index];
+    if (!service) {
+      return;
+    }
+
+    const [healthResult, runtimeResult] = await Promise.all([
+      checkService(service.url),
+      getServiceDockerStats(service),
+    ]);
+
+    health[index] = {
+      state: healthResult.state,
+      errorCode: healthResult.errorCode,
+      errorDetails: healthResult.errorDetails,
+      lastCheckedAt: Date.now(),
+    };
+
+    if (runtimeResult.ok) {
+      runtimeStats[index] = {
+        state: "available",
+        source: "docker",
+        containerName: runtimeResult.data.stats.containerName,
+        cpuUsage: runtimeResult.data.stats.cpuUsage,
+        memoryUsage: runtimeResult.data.stats.memoryUsage,
+        diskUsage: runtimeResult.data.stats.diskUsage,
+        lastCheckedAt: runtimeResult.data.stats.collectedAt,
+        errorCode: null,
+        errorDetails: null,
+      };
+      return;
+    }
+
+    if (runtimeResult.error.code === "NON_LOCAL_SERVICE") {
+      runtimeStats[index] = {
+        state: "not-applicable",
+        source: null,
+        containerName: null,
+        cpuUsage: null,
+        memoryUsage: null,
+        diskUsage: null,
+        lastCheckedAt: Date.now(),
+        errorCode: runtimeResult.error.code,
+        errorDetails: runtimeResult.error.message,
+      };
+      return;
+    }
+
+    runtimeStats[index] = {
+      state: "unavailable",
+      source: "docker",
+      containerName: null,
+      cpuUsage: null,
+      memoryUsage: null,
+      diskUsage: null,
+      lastCheckedAt: Date.now(),
+      errorCode: runtimeResult.error.code,
+      errorDetails: runtimeResult.error.details ?? runtimeResult.error.message,
+    };
+  };
+
+  const detectAndPersistServiceContainer = async (index: number): Promise<void> => {
+    const service = services[index];
+    if (!service) {
+      return;
+    }
+
+    const resolution = await resolveServiceContainer(service);
+    if (!resolution.ok) {
+      return;
+    }
+
+    if (resolution.data.source !== "port_lookup") {
+      return;
+    }
+
+    const resolvedId = resolution.data.id?.trim() || null;
+    const resolvedName = resolution.data.name.trim();
+
+    const nextContainerId = resolvedId ?? undefined;
+    const nextContainerName = resolvedName || undefined;
+
+    const hasChanges =
+      service.containerId !== nextContainerId || service.containerName !== nextContainerName;
+
+    if (!hasChanges) {
+      return;
+    }
+
+    service.containerId = nextContainerId;
+    service.containerName = nextContainerName;
+    await saveConfig(config);
+  };
+
+  const refreshServiceAndDetectContainer = async (index: number): Promise<void> => {
+    await refreshServiceState(index);
+
+    try {
+      await detectAndPersistServiceContainer(index);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      runtimeStats[index] = {
+        ...runtimeStats[index],
+        state: "unavailable",
+        source: "docker",
+        errorCode: "DOCKER_LINK_PERSIST_FAILED",
+        errorDetails: message,
+      };
+    }
+  };
+
   const refreshHealth = async () => {
     if (stopped) {
       return;
     }
 
-    await Promise.all(
-      services.map(async (service, index) => {
-        const result = await checkService(service.url);
-        health[index] = {
-          state: result.state,
-          errorCode: result.errorCode,
-          errorDetails: result.errorDetails,
-          lastCheckedAt: Date.now(),
-        };
-      }),
-    );
+    await Promise.all(services.map((_, index) => refreshServiceState(index)));
 
     if (stopped) {
       return;
@@ -682,15 +923,15 @@ async function main() {
     process.exit(0);
   };
 
-  const isTextField = (index: number): boolean => index === 0 || index === 1;
+  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2;
 
   const nextField = (): void => {
-    const max = 3;
+    const max = 4;
     focusedFieldIndex = (focusedFieldIndex + 1) % (max + 1);
   };
 
   const prevField = (): void => {
-    const max = 3;
+    const max = 4;
     focusedFieldIndex = (focusedFieldIndex - 1 + max + 1) % (max + 1);
   };
 
@@ -730,14 +971,14 @@ async function main() {
         return;
       }
 
-      if (event.name === "left" && focusedFieldIndex === 2) {
+      if (event.name === "left" && focusedFieldIndex === 3) {
         formFields.iconIndex = (formFields.iconIndex - 1 + ICON_PRESETS.length) % ICON_PRESETS.length;
         safeRender();
         event.preventDefault();
         return;
       }
 
-      if (event.name === "right" && focusedFieldIndex === 2) {
+      if (event.name === "right" && focusedFieldIndex === 3) {
         formFields.iconIndex = (formFields.iconIndex + 1) % ICON_PRESETS.length;
         safeRender();
         event.preventDefault();
@@ -745,7 +986,7 @@ async function main() {
       }
 
       if (event.name === "return" || event.name === "enter") {
-        if (focusedFieldIndex === 3) {
+        if (focusedFieldIndex === 4) {
           void submitForm();
           event.preventDefault();
           return;
@@ -758,6 +999,8 @@ async function main() {
             formFields.serviceName = formFields.serviceName.slice(0, -1);
           } else if (focusedFieldIndex === 1) {
             formFields.url = formFields.url.slice(0, -1);
+          } else if (focusedFieldIndex === 2) {
+            formFields.containerId = formFields.containerId.slice(0, -1);
           }
           safeRender();
         }
@@ -776,6 +1019,8 @@ async function main() {
             formFields.serviceName += event.sequence;
           } else if (focusedFieldIndex === 1) {
             formFields.url += event.sequence;
+          } else if (focusedFieldIndex === 2) {
+            formFields.containerId += event.sequence;
           }
           safeRender();
         }

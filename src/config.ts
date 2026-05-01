@@ -29,6 +29,16 @@ function assertConfig(data: unknown): asserts data is Config {
     if (typeof url !== "string" || !url.trim()) {
       throw new Error(`Service '${name}' must have a non-empty url.`);
     }
+
+    const containerId = (service as { containerId?: unknown }).containerId;
+    if (containerId !== undefined && typeof containerId !== "string") {
+      throw new Error(`Service '${name}' has an invalid containerId; expected a string.`);
+    }
+
+    const containerName = (service as { containerName?: unknown }).containerName;
+    if (containerName !== undefined && typeof containerName !== "string") {
+      throw new Error(`Service '${name}' has an invalid containerName; expected a string.`);
+    }
   }
 }
 
