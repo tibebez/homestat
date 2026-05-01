@@ -40,6 +40,11 @@ function assertConfig(data: unknown): asserts data is Config {
       throw new Error(`Service '${name}' has an invalid containerName; expected a string.`);
     }
 
+    const source = (service as { source?: unknown }).source;
+    if (source !== undefined && source !== "docker" && source !== "static") {
+      throw new Error(`Service '${name}' has an invalid source; expected 'docker', 'static', or undefined.`);
+    }
+
     const group = (service as { group?: unknown }).group;
     if (group !== undefined && group !== null && typeof group !== "string") {
       throw new Error(`Service '${name}' has an invalid group; expected a string, null, or undefined.`);

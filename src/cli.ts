@@ -10,7 +10,12 @@ import {
   normalizeServiceUrl,
   relativeTime,
 } from "./health.ts";
-import { getServiceDockerStats, resolveServiceContainer } from "./docker.ts";
+import {
+  discoverHomestatDockerServices,
+  getServiceDockerStats,
+  mergeStaticAndDockerServices,
+  resolveServiceContainer,
+} from "./docker.ts";
 import {
   getDistinctGroupNames,
   getServiceGroupLabel,
@@ -126,6 +131,30 @@ async function main() {
   const config = await loadConfig();
   const services = config.services;
 
+  async function saveStaticConfigOnly(): Promise<void> {
+    const staticServices = services
+      .filter((service) => service.source !== "docker")
+      .map((service) => {
+        const { source, ...rest } = service;
+        return rest;
+      });
+
+    await saveConfig({ services: staticServices });
+  }
+
+  async function refreshDockerDiscoveredServices(): Promise<void> {
+    const dockerDiscovery = await discoverHomestatDockerServices("🐳");
+    if (!dockerDiscovery.ok) {
+      return;
+    }
+
+    const staticServices = services.filter((service) => service.source !== "docker");
+    const merged = mergeStaticAndDockerServices(staticServices, dockerDiscovery.data);
+    services.splice(0, services.length, ...merged);
+  }
+
+  await refreshDockerDiscoveredServices();
+
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
     useMouse: false,
@@ -204,56 +233,78 @@ async function main() {
   const CARD_HEIGHT = 9;
   const CARD_ROW_STRIDE = CARD_HEIGHT + 1;
 
-  const rowTexts = services.map(
-    (_, index) =>
-      new BoxRenderable(renderer, {
-        id: `service-row-${index}`,
-        width: "48%",
-        height: CARD_HEIGHT,
-        padding: 1,
-        border: true,
-        flexDirection: "column",
-        justifyContent: "space-between",
-        backgroundColor: COLORS.cardBg,
-        borderColor: COLORS.cardBorder,
-      }),
-  );
+  const rowTexts: BoxRenderable[] = [];
+  const cardHeaderBoxes: BoxRenderable[] = [];
+  const cardIconTexts: TextRenderable[] = [];
+  const cardStatusTexts: TextRenderable[] = [];
+  const cardBottomTexts: TextRenderable[] = [];
 
-  const cardHeaderBoxes = services.map(
-    (_, index) =>
-      new BoxRenderable(renderer, {
-        id: `service-header-${index}`,
-        width: "100%",
-        flexDirection: "row",
-        justifyContent: "space-between",
-        alignItems: "center",
-      }),
-  );
+  let cardSlotCounter = 0;
 
-  const cardIconTexts = services.map(
-    (_, index) =>
-      new TextRenderable(renderer, {
-        id: `service-icon-${index}`,
-        content: "",
-      }),
-  );
+  function createCardSlot(): void {
+    const slotId = cardSlotCounter++;
 
-  const cardStatusTexts = services.map(
-    (_, index) =>
-      new TextRenderable(renderer, {
-        id: `service-status-${index}`,
-        content: "",
-      }),
-  );
+    const row = new BoxRenderable(renderer, {
+      id: `service-row-${slotId}`,
+      width: "48%",
+      height: CARD_HEIGHT,
+      padding: 1,
+      border: true,
+      flexDirection: "column",
+      justifyContent: "space-between",
+      backgroundColor: COLORS.cardBg,
+      borderColor: COLORS.cardBorder,
+    });
 
-  const cardBottomTexts = services.map(
-    (_, index) =>
-      new TextRenderable(renderer, {
-        id: `service-bottom-${index}`,
-        content: "",
-        fg: COLORS.text,
-      }),
-  );
+    const header = new BoxRenderable(renderer, {
+      id: `service-header-${slotId}`,
+      width: "100%",
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    });
+
+    const icon = new TextRenderable(renderer, {
+      id: `service-icon-${slotId}`,
+      content: "",
+    });
+
+    const status = new TextRenderable(renderer, {
+      id: `service-status-${slotId}`,
+      content: "",
+    });
+
+    const bottom = new TextRenderable(renderer, {
+      id: `service-bottom-${slotId}`,
+      content: "",
+      fg: COLORS.text,
+    });
+
+    row.add(header);
+    header.add(icon);
+    header.add(status);
+    row.add(bottom);
+    cardsGrid.add(row);
+
+    rowTexts.push(row);
+    cardHeaderBoxes.push(header);
+    cardIconTexts.push(icon);
+    cardStatusTexts.push(status);
+    cardBottomTexts.push(bottom);
+  }
+
+  function removeCardSlot(index: number): void {
+    const row = rowTexts[index];
+    if (row) {
+      cardsGrid.remove(row.id);
+    }
+
+    rowTexts.splice(index, 1);
+    cardHeaderBoxes.splice(index, 1);
+    cardIconTexts.splice(index, 1);
+    cardStatusTexts.splice(index, 1);
+    cardBottomTexts.splice(index, 1);
+  }
 
   const detailsTitle = new TextRenderable(renderer, {
     id: "details-title",
@@ -318,14 +369,6 @@ async function main() {
   servicesPanel.add(cardsViewport);
   cardsViewport.add(cardsGrid);
 
-  for (const [index, rowText] of rowTexts.entries()) {
-    cardsGrid.add(rowText);
-    rowText.add(cardHeaderBoxes[index]);
-    cardHeaderBoxes[index].add(cardIconTexts[index]);
-    cardHeaderBoxes[index].add(cardStatusTexts[index]);
-    rowText.add(cardBottomTexts[index]);
-  }
-
   detailsPanel.add(detailsTitle);
   detailsPanel.add(detailsUrl);
   detailsPanel.add(detailsHealth);
@@ -336,11 +379,48 @@ async function main() {
   detailsPanel.add(detailsRam);
   detailsPanel.add(detailsDisk);
 
-  const health = services.map(() => createInitialHealth());
-  const runtimeStats = services.map(() => createInitialRuntimeStats());
+  const health: ServiceHealth[] = [];
+  const runtimeStats: ServiceRuntimeStats[] = [];
   let selectedIndex = 0;
   let scrollRowOffset = 0;
   let currentView: ServiceListView = { kind: "all" };
+
+  function syncStateWithServices(): void {
+    while (rowTexts.length < services.length) {
+      createCardSlot();
+    }
+
+    while (rowTexts.length > services.length) {
+      removeCardSlot(rowTexts.length - 1);
+    }
+
+    while (health.length < services.length) {
+      health.push(createInitialHealth());
+    }
+
+    if (health.length > services.length) {
+      health.splice(services.length);
+    }
+
+    while (runtimeStats.length < services.length) {
+      runtimeStats.push(createInitialRuntimeStats());
+    }
+
+    if (runtimeStats.length > services.length) {
+      runtimeStats.splice(services.length);
+    }
+
+    if (services.length === 0) {
+      selectedIndex = 0;
+      return;
+    }
+
+    if (selectedIndex >= services.length) {
+      selectedIndex = services.length - 1;
+    }
+  }
+
+  syncStateWithServices();
 
   function getViewCycleOrder(): ServiceListView[] {
     const groupNames = getDistinctGroupNames(services);
@@ -562,15 +642,26 @@ async function main() {
       };
 
       if (formMode === "edit" && editingIndex >= 0) {
-        config.services[editingIndex] = {
-          ...config.services[editingIndex],
+        const existing = services[editingIndex];
+        if (!existing) {
+          formError = "Error: Service no longer exists.";
+          safeRender();
+          return;
+        }
+
+        services[editingIndex] = {
+          ...existing,
           ...serviceData,
         };
-        await saveConfig(config);
+
+        if (services[editingIndex].source !== "docker") {
+          await saveStaticConfigOnly();
+        }
 
         isFormActive = false;
         formError = "";
         selectedIndex = editingIndex;
+        syncStateWithServices();
         safeRender();
 
         void refreshServiceAndDetectContainer(editingIndex).then(() => {
@@ -579,63 +670,18 @@ async function main() {
         return;
       }
 
-      config.services.push(serviceData);
-      await saveConfig(config);
-
-      const newIndex = services.length - 1;
-      const newRowText = new BoxRenderable(renderer, {
-        id: `service-row-${newIndex}`,
-        width: "48%",
-        height: CARD_HEIGHT,
-        padding: 1,
-        border: true,
-        flexDirection: "column",
-        justifyContent: "space-between",
-        backgroundColor: COLORS.cardBg,
-        borderColor: COLORS.cardBorder,
-      });
-      const newHeaderBox = new BoxRenderable(renderer, {
-        id: `service-header-${newIndex}`,
-        width: "100%",
-        flexDirection: "row",
-        justifyContent: "space-between",
-        alignItems: "center",
-      });
-      const newIconText = new TextRenderable(renderer, {
-        id: `service-icon-${newIndex}`,
-        content: "",
-      });
-      const newStatusText = new TextRenderable(renderer, {
-        id: `service-status-${newIndex}`,
-        content: "",
-      });
-      const newBottomText = new TextRenderable(renderer, {
-        id: `service-bottom-${newIndex}`,
-        content: "",
-        fg: COLORS.text,
-      });
-
-      newRowText.add(newHeaderBox);
-      newHeaderBox.add(newIconText);
-      newHeaderBox.add(newStatusText);
-      newRowText.add(newBottomText);
-      cardsGrid.add(newRowText);
-
-      rowTexts.push(newRowText);
-      cardHeaderBoxes.push(newHeaderBox);
-      cardIconTexts.push(newIconText);
-      cardStatusTexts.push(newStatusText);
-      cardBottomTexts.push(newBottomText);
-      health.push(createInitialHealth());
-      runtimeStats.push(createInitialRuntimeStats());
+      const firstDockerIndex = services.findIndex((service) => service.source === "docker");
+      const insertIndex = firstDockerIndex >= 0 ? firstDockerIndex : services.length;
+      services.splice(insertIndex, 0, serviceData);
+      await saveStaticConfigOnly();
 
       isFormActive = false;
-      selectedIndex = newIndex;
+      selectedIndex = insertIndex;
       formError = "";
-
+      syncStateWithServices();
       safeRender();
 
-      void refreshServiceAndDetectContainer(newIndex).then(() => {
+      void refreshServiceAndDetectContainer(insertIndex).then(() => {
         safeRender();
       });
     } finally {
@@ -646,18 +692,14 @@ async function main() {
   async function deleteService(index: number) {
     if (index < 0 || index >= services.length) return;
 
-    config.services.splice(index, 1);
-    await saveConfig(config);
+    const service = services[index];
+    services.splice(index, 1);
 
-    cardsGrid.remove(rowTexts[index].id);
+    if (service?.source !== "docker") {
+      await saveStaticConfigOnly();
+    }
 
-    rowTexts.splice(index, 1);
-    cardHeaderBoxes.splice(index, 1);
-    cardIconTexts.splice(index, 1);
-    cardStatusTexts.splice(index, 1);
-    cardBottomTexts.splice(index, 1);
-    health.splice(index, 1);
-    runtimeStats.splice(index, 1);
+    syncStateWithServices();
 
     if (services.length === 0) {
       selectedIndex = 0;
@@ -673,7 +715,11 @@ async function main() {
   async function toggleBookmark(index: number) {
     if (index < 0 || index >= services.length) return;
 
-    const service = config.services[index];
+    const service = services[index];
+    if (!service || service.source === "docker") {
+      return;
+    }
+
     const previousBookmarked = service.bookmarked;
     const previousBookmarkedAt = service.bookmarkedAt;
 
@@ -685,7 +731,7 @@ async function main() {
     safeRender();
 
     try {
-      await saveConfig(config);
+      await saveStaticConfigOnly();
     } catch (error) {
       // Restore in-memory state before escalating this persistence failure.
       service.bookmarked = previousBookmarked;
@@ -718,6 +764,8 @@ async function main() {
   };
 
   const render = () => {
+    syncStateWithServices();
+
     const activeServiceIndexes = getActiveServiceIndexes();
     ensureSelectionWithinActive(activeServiceIndexes);
     servicesPanel.title = getCurrentServicesPanelTitle();
@@ -1029,7 +1077,7 @@ async function main() {
 
   const detectAndPersistServiceContainer = async (index: number): Promise<void> => {
     const service = services[index];
-    if (!service) {
+    if (!service || service.source === "docker") {
       return;
     }
 
@@ -1057,7 +1105,7 @@ async function main() {
 
     service.containerId = nextContainerId;
     service.containerName = nextContainerName;
-    await saveConfig(config);
+    await saveStaticConfigOnly();
   };
 
   const refreshServiceAndDetectContainer = async (index: number): Promise<void> => {
@@ -1077,9 +1125,14 @@ async function main() {
     }
   };
 
-  const refreshHealth = async () => {
+  const refreshHealth = async (withDockerDiscovery = false) => {
     if (stopped) {
       return;
+    }
+
+    if (withDockerDiscovery) {
+      await refreshDockerDiscoveredServices();
+      syncStateWithServices();
     }
 
     await Promise.all(services.map((_, index) => refreshServiceState(index)));
@@ -1094,14 +1147,14 @@ async function main() {
   safeRender();
 
   const healthInterval = setInterval(() => {
-    void refreshHealth();
+    void refreshHealth(false);
   }, HEALTH_CHECK_INTERVAL_MS);
 
   const relativeInterval = setInterval(() => {
     safeRender();
   }, 1_000);
 
-  void refreshHealth();
+  void refreshHealth(false);
 
   const stop = () => {
     if (stopped) {
@@ -1343,7 +1396,7 @@ async function main() {
     }
 
     if ((event.sequence === "r" || event.name === "r") && !event.ctrl && !event.meta) {
-      void refreshHealth();
+      void refreshHealth(true);
       event.preventDefault();
       return;
     }

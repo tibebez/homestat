@@ -53,6 +53,19 @@ export interface DockerContainerStats {
   collectedAt: number;
 }
 
+export interface DockerDiscoveredContainer {
+  id: string;
+  name: string;
+  labels: Record<string, string>;
+  ports: string;
+}
+
+export interface DockerDiscoveryService extends Service {
+  source: "docker";
+  containerId: string;
+  containerName: string;
+}
+
 interface ParsedServiceUrl {
   hostname: string;
   port: number;
@@ -239,6 +252,215 @@ function readRequiredString(record: Record<string, unknown>, key: string): strin
 
 function normalizeContainerIdentifier(value: string): string {
   return value.trim();
+}
+
+function parseDockerLabelString(value: string): Record<string, string> {
+  const labels: Record<string, string> = {};
+
+  for (const entry of value.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, separator).trim();
+    const labelValue = trimmed.slice(separator + 1).trim();
+
+    if (!key) {
+      continue;
+    }
+
+    labels[key] = labelValue;
+  }
+
+  return labels;
+}
+
+function sanitizeContainerName(value: string): string {
+  return value.split(",")[0]?.trim().replace(/^\//, "") ?? "";
+}
+
+function parsePublishedPort(ports: string): number | null {
+  const patterns = [/:(\d+)->\d+\//g, /(^|\s|,)(\d+)->\d+\//g];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(ports);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number(match[match.length - 1]);
+    if (Number.isInteger(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function parseDockerPsRecord(record: Record<string, unknown>): DockerDiscoveredContainer | null {
+  const id = readRequiredString(record, "ID") ?? readRequiredString(record, "ContainerID");
+  const rawName = readRequiredString(record, "Names") ?? readRequiredString(record, "Name");
+
+  if (!id || !rawName) {
+    return null;
+  }
+
+  const labelsRaw = readOptionalString(record, "Labels") ?? "";
+  const ports = readOptionalString(record, "Ports") ?? "";
+
+  return {
+    id,
+    name: sanitizeContainerName(rawName),
+    labels: parseDockerLabelString(labelsRaw),
+    ports,
+  };
+}
+
+function parseDockerPsJsonOutput(output: string): DockerResult<DockerDiscoveredContainer[]> {
+  const trimmed = output.trim();
+  if (!trimmed) {
+    return success([]);
+  }
+
+  // Newer Docker CLI builds may return either NDJSON lines or a single JSON array.
+  if (trimmed.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (error) {
+      return failure("DOCKER_OUTPUT_PARSE_ERROR", "Docker ps output is not valid JSON.", asErrorMessage(error));
+    }
+
+    if (!Array.isArray(parsed)) {
+      return failure("DOCKER_OUTPUT_PARSE_ERROR", "Docker ps output JSON must be an array.", trimmed);
+    }
+
+    const containers: DockerDiscoveredContainer[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+
+      const parsedContainer = parseDockerPsRecord(item as Record<string, unknown>);
+      if (parsedContainer) {
+        containers.push(parsedContainer);
+      }
+    }
+
+    return success(containers);
+  }
+
+  const containers: DockerDiscoveredContainer[] = [];
+
+  for (const line of output.split(/\r?\n/)) {
+    const jsonLine = line.trim();
+    if (!jsonLine) {
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonLine);
+    } catch (error) {
+      return failure(
+        "DOCKER_OUTPUT_PARSE_ERROR",
+        "Docker ps line is not valid JSON.",
+        `${jsonLine}\n${asErrorMessage(error)}`,
+      );
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      continue;
+    }
+
+    const parsedContainer = parseDockerPsRecord(parsed as Record<string, unknown>);
+    if (parsedContainer) {
+      containers.push(parsedContainer);
+    }
+  }
+
+  return success(containers);
+}
+
+export function mapDiscoveredContainersToServices(
+  containers: readonly DockerDiscoveredContainer[],
+  defaultIcon = "🐳",
+): DockerDiscoveryService[] {
+  const services: DockerDiscoveryService[] = [];
+
+  for (const container of containers) {
+    const name = container.labels["homestat.name"]?.trim() || container.name;
+    const icon = container.labels["homestat.icon"]?.trim() || defaultIcon;
+    const explicitUrl = container.labels["homestat.url"]?.trim();
+    const publishedPort = parsePublishedPort(container.ports);
+    const fallbackUrl = publishedPort ? `http://localhost:${publishedPort}` : "http://localhost";
+
+    services.push({
+      source: "docker",
+      containerId: container.id,
+      containerName: container.name,
+      name: name || container.id,
+      url: explicitUrl || fallbackUrl,
+      icon,
+    });
+  }
+
+  return services;
+}
+
+export function mergeStaticAndDockerServices(
+  staticServices: readonly Service[],
+  dockerServices: readonly DockerDiscoveryService[],
+): Service[] {
+  const existingStaticContainerIds = new Set(
+    staticServices
+      .map((service) => service.containerId?.trim())
+      .filter((value): value is string => Boolean(value)),
+  );
+
+  const seenDockerContainerIds = new Set<string>();
+  const dedupedDocker: DockerDiscoveryService[] = [];
+
+  for (const service of dockerServices) {
+    const id = service.containerId.trim();
+    if (!id || existingStaticContainerIds.has(id) || seenDockerContainerIds.has(id)) {
+      continue;
+    }
+
+    seenDockerContainerIds.add(id);
+    dedupedDocker.push(service);
+  }
+
+  return [...staticServices, ...dedupedDocker];
+}
+
+export async function discoverHomestatDockerServices(
+  defaultIcon = "🐳",
+): Promise<DockerResult<DockerDiscoveryService[]>> {
+  const result = await runDocker([
+    "ps",
+    "--filter",
+    "label=homestat.enabled=true",
+    "--format",
+    "json",
+  ]);
+
+  if (!result.ok) {
+    return result;
+  }
+
+  const parsed = parseDockerPsJsonOutput(result.data.stdout);
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  return success(mapDiscoveredContainersToServices(parsed.data, defaultIcon));
 }
 
 export function isLocalServiceUrl(url: string): boolean {

@@ -1,8 +1,11 @@
 export { CONFIG_PATH, loadConfig, saveConfig } from "./config.ts";
 export {
+  discoverHomestatDockerServices,
   fetchDockerContainerStats,
   getServiceDockerStats,
   isLocalServiceUrl,
+  mapDiscoveredContainersToServices,
+  mergeStaticAndDockerServices,
   parseDockerStatsJsonLine,
   parseDockerStatsOutput,
   resolveServiceContainer,
@@ -10,6 +13,8 @@ export {
 export type {
   DockerContainerRef,
   DockerContainerStats,
+  DockerDiscoveredContainer,
+  DockerDiscoveryService,
   DockerError,
   DockerErrorCode,
   DockerResult,

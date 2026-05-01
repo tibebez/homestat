@@ -60,3 +60,20 @@ Create `~/.homestat/config.json`:
 - `unknown`: not checked yet
 
 Rows show service status; the details panel shows last checked time, error details, and runtime stats when available.
+
+## Docker auto-discovery
+
+On startup and on `r` refresh, homestat also checks running Docker containers with:
+
+```bash
+docker ps --filter "label=homestat.enabled=true" --format json
+```
+
+For each matching container, homestat creates a temporary service (`source: "docker"`) using:
+
+- `homestat.name`, `homestat.url`, `homestat.icon` labels when present
+- fallback name: container name
+- fallback URL: `http://localhost:<published-port>`
+- fallback icon: `🐳`
+
+Discovered services are merged with static `~/.homestat/config.json` services and deduped by container ID. They are not written back to config.
