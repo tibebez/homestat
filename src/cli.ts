@@ -36,6 +36,15 @@ function truncate(value: string, length: number): string {
   return `${value.slice(0, Math.max(0, length - 1))}…`;
 }
 
+function capitalizeFirstLetter(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
+}
+
 function formFieldLine(
   label: string,
   value: string,
@@ -108,10 +117,6 @@ function createInitialRuntimeStats(): ServiceRuntimeStats {
 async function main() {
   const config = await loadConfig();
   const services = config.services;
-
-  if (services.length === 0) {
-    throw new Error("No services configured. Add at least one service in ~/.homestat/config.json.");
-  }
 
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
@@ -242,33 +247,6 @@ async function main() {
       }),
   );
 
-  const addNewCard = new BoxRenderable(renderer, {
-    id: `service-row-add-new`,
-    width: "48%",
-    height: CARD_HEIGHT,
-    padding: 1,
-    border: true,
-    flexDirection: "column",
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: COLORS.cardBg,
-    borderColor: COLORS.cardBorder,
-  });
-
-  const addNewText = new TextRenderable(renderer, {
-    id: "add-new-text",
-    content: "+ Add Service",
-    fg: COLORS.text,
-  });
-
-  const addNewHint = new TextRenderable(renderer, {
-    id: "add-new-hint",
-    content: "(coming soon)",
-    fg: COLORS.muted,
-  });
-
-  addNewCard.add(addNewText);
-
   const detailsTitle = new TextRenderable(renderer, {
     id: "details-title",
     content: "",
@@ -339,7 +317,6 @@ async function main() {
     cardHeaderBoxes[index].add(cardStatusTexts[index]);
     rowText.add(cardBottomTexts[index]);
   }
-  cardsGrid.add(addNewCard);
 
   detailsPanel.add(detailsTitle);
   detailsPanel.add(detailsUrl);
@@ -415,14 +392,17 @@ async function main() {
       }
 
       const serviceData: Service = {
-        name: formFields.serviceName.trim(),
+        name: capitalizeFirstLetter(formFields.serviceName),
         url: formFields.url.trim(),
         containerId: formFields.containerId.trim() || undefined,
         icon: ICON_PRESETS[formFields.iconIndex],
       };
 
       if (formMode === "edit" && editingIndex >= 0) {
-        config.services[editingIndex] = serviceData;
+        config.services[editingIndex] = {
+          ...config.services[editingIndex],
+          ...serviceData,
+        };
         await saveConfig(config);
 
         isFormActive = false;
@@ -476,7 +456,7 @@ async function main() {
       newHeaderBox.add(newIconText);
       newHeaderBox.add(newStatusText);
       newRowText.add(newBottomText);
-      cardsGrid.insertBefore(newRowText, addNewCard);
+      cardsGrid.add(newRowText);
 
       rowTexts.push(newRowText);
       cardHeaderBoxes.push(newHeaderBox);
@@ -516,9 +496,23 @@ async function main() {
     health.splice(index, 1);
     runtimeStats.splice(index, 1);
 
-    if (selectedIndex > index) {
+    if (services.length === 0) {
+      selectedIndex = 0;
+    } else if (selectedIndex > index) {
       selectedIndex--;
+    } else if (selectedIndex >= services.length) {
+      selectedIndex = services.length - 1;
     }
+
+    safeRender();
+  }
+
+  async function toggleBookmark(index: number) {
+    if (index < 0 || index >= services.length) return;
+
+    const service = config.services[index];
+    service.bookmarked = !service.bookmarked;
+    await saveConfig(config);
 
     safeRender();
   }
@@ -547,7 +541,7 @@ async function main() {
     for (const [index, service] of services.entries()) {
       const rowHealth = health[index];
       const icon = service.icon ?? "•";
-      const name = truncate(service.name, 20);
+      const name = truncate(capitalizeFirstLetter(service.name), 20);
       const description = service.description
         ? truncate(service.description, 30)
         : truncate(service.url, 30);
@@ -558,7 +552,9 @@ async function main() {
       cardIconTexts[index].content = t`${iconChunk}`;
 
       const badgeColor = statusColor(rowHealth.state);
-      cardStatusTexts[index].content = t`${fg(badgeColor)(`[ ${badge} ]`)}`;
+      cardStatusTexts[index].content = service.bookmarked
+        ? t`${fg(badgeColor)(`[ ${badge} ]`)} ${fg(COLORS.muted)("★")}`
+        : t`${fg(badgeColor)(`[ ${badge} ]`)}`;
 
       const nameColor = focused ? COLORS.focused : COLORS.text;
       cardBottomTexts[index].content = t`${bold(fg(nameColor)(name))}\n${fg(COLORS.muted)(description)}`;
@@ -566,6 +562,7 @@ async function main() {
       rowTexts[index].borderStyle = focused ? "double" : "single";
       rowTexts[index].borderColor = focused ? COLORS.cardBorderFocused : COLORS.cardBorder;
     }
+
 
     const selectedRow = Math.floor(selectedIndex / CARD_COLUMNS);
     const visibleRows = Math.max(1, Math.floor(cardsViewport.height / CARD_ROW_STRIDE));
@@ -577,18 +574,6 @@ async function main() {
     }
 
     cardsGrid.translateY = -(scrollRowOffset * CARD_ROW_STRIDE);
-
-    if (selectedIndex === services.length) {
-      addNewText.fg = COLORS.focused;
-      addNewHint.fg = COLORS.focused;
-      addNewCard.borderStyle = "double";
-      addNewCard.borderColor = COLORS.cardBorderFocused;
-    } else {
-      addNewText.fg = COLORS.text;
-      addNewHint.fg = COLORS.muted;
-      addNewCard.borderStyle = "single";
-      addNewCard.borderColor = COLORS.cardBorder;
-    }
 
     const pw = detailsPanel.width;
     const contentWidth = Math.max(10, pw - 4);
@@ -639,11 +624,11 @@ async function main() {
       detailsDisk.fg = COLORS.text;
 
       footerText.content = "↑/↓ navigate fields • ←/→ icon • Type to edit • Enter to save • Esc to cancel";
-    } else if (selectedIndex === services.length) {
-      detailsTitle.content = "+ Add New Service";
+    } else if (services.length === 0) {
+      detailsTitle.content = "No Services Yet";
       detailsTitle.fg = COLORS.focused;
 
-      detailsUrl.content = "Press Enter to create a new service";
+      detailsUrl.content = "Press n to add your first service";
       detailsUrl.fg = COLORS.muted;
 
       detailsHealth.content = "";
@@ -664,14 +649,16 @@ async function main() {
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "←/→/↑/↓ navigate • Enter to add • r refresh • Ctrl+C quit";
+      footerText.content = "n new service • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
       const selectedRuntime = runtimeStats[selectedIndex];
 
-      const titlePrefix = `${selected.icon ?? "•"} `;
-      detailsTitle.content = titlePrefix + truncate(selected.name, Math.max(3, contentWidth - titlePrefix.length));
+      const bookmarkPrefix = selected.bookmarked ? "★ " : "";
+      const titlePrefix = `${selected.icon ?? "•"} ${bookmarkPrefix}`;
+      detailsTitle.content =
+        titlePrefix + truncate(capitalizeFirstLetter(selected.name), Math.max(3, contentWidth - titlePrefix.length));
       detailsTitle.fg = COLORS.focused;
 
       const urlPrefix = "URL: ";
@@ -757,7 +744,7 @@ async function main() {
             ? " • docker stats unavailable"
             : "";
 
-      footerText.content = `←/→/↑/↓ navigate • o open • e edit • d delete • r refresh • Ctrl+C quit${runtimeHint}`;
+      footerText.content = `←/→/↑/↓ navigate • n new • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit${runtimeHint}`;
     }
   };
 
@@ -949,8 +936,10 @@ async function main() {
         isFormActive = false;
         if (formMode === "edit" && editingIndex >= 0) {
           selectedIndex = editingIndex;
-        } else {
-          selectedIndex = services.length;
+        } else if (services.length === 0) {
+          selectedIndex = 0;
+        } else if (selectedIndex >= services.length) {
+          selectedIndex = services.length - 1;
         }
         safeRender();
         event.preventDefault();
@@ -1033,35 +1022,51 @@ async function main() {
     }
 
     if (event.name === "left") {
-      selectedIndex = (selectedIndex - 1 + services.length + 1) % (services.length + 1);
-      safeRender();
+      if (services.length > 0) {
+        selectedIndex = (selectedIndex - 1 + services.length) % services.length;
+        safeRender();
+      }
       event.preventDefault();
       return;
     }
 
     if (event.name === "right") {
-      selectedIndex = (selectedIndex + 1) % (services.length + 1);
-      safeRender();
+      if (services.length > 0) {
+        selectedIndex = (selectedIndex + 1) % services.length;
+        safeRender();
+      }
       event.preventDefault();
       return;
     }
 
     if (event.name === "up") {
-      selectedIndex = (selectedIndex - CARD_COLUMNS + services.length + 1) % (services.length + 1);
-      safeRender();
+      if (services.length > 0) {
+        selectedIndex = (selectedIndex - CARD_COLUMNS + services.length) % services.length;
+        safeRender();
+      }
       event.preventDefault();
       return;
     }
 
     if (event.name === "down") {
-      selectedIndex = (selectedIndex + CARD_COLUMNS) % (services.length + 1);
+      if (services.length > 0) {
+        selectedIndex = (selectedIndex + CARD_COLUMNS) % services.length;
+        safeRender();
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.sequence === "n" || event.name === "n") && !event.ctrl && !event.meta) {
+      resetForm();
+      isFormActive = true;
       safeRender();
       event.preventDefault();
       return;
     }
 
     if ((event.sequence === "o" || event.name === "o") && !event.ctrl && !event.meta) {
-      if (selectedIndex !== services.length) {
+      if (services.length > 0) {
         const selected = services[selectedIndex];
         const normalized = normalizeServiceUrl(selected.url);
         void open(normalized);
@@ -1071,7 +1076,7 @@ async function main() {
     }
 
     if ((event.sequence === "e" || event.name === "e") && !event.ctrl && !event.meta) {
-      if (selectedIndex !== services.length) {
+      if (services.length > 0) {
         startEditForm(selectedIndex);
         safeRender();
       }
@@ -1080,8 +1085,16 @@ async function main() {
     }
 
     if ((event.sequence === "d" || event.name === "d") && !event.ctrl && !event.meta) {
-      if (selectedIndex !== services.length) {
+      if (services.length > 0) {
         void deleteService(selectedIndex);
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.sequence === "b" || event.name === "b") && !event.ctrl && !event.meta) {
+      if (services.length > 0) {
+        void toggleBookmark(selectedIndex);
       }
       event.preventDefault();
       return;
@@ -1093,15 +1106,6 @@ async function main() {
       return;
     }
 
-    if (event.name === "return" || event.name === "enter") {
-      if (selectedIndex === services.length) {
-        isFormActive = true;
-        resetForm();
-        safeRender();
-        event.preventDefault();
-        return;
-      }
-    }
   });
 
   process.once("SIGINT", exitGracefully);

@@ -39,6 +39,11 @@ function assertConfig(data: unknown): asserts data is Config {
     if (containerName !== undefined && typeof containerName !== "string") {
       throw new Error(`Service '${name}' has an invalid containerName; expected a string.`);
     }
+
+    const bookmarked = (service as { bookmarked?: unknown }).bookmarked;
+    if (bookmarked !== undefined && typeof bookmarked !== "boolean") {
+      throw new Error(`Service '${name}' has an invalid bookmarked flag; expected a boolean.`);
+    }
   }
 }
 

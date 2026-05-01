@@ -44,8 +44,9 @@ Create `~/.homestat/config.json`:
 ## Controls
 
 - `←` / `→` / `↑` / `↓`: navigate cards
-- `Enter`: add service (when `+ Add Service` card is selected)
+- `n`: add a new service (opens form in details panel)
 - `o`: open selected service in browser
+- `b`: toggle bookmark on selected service (shows a subtle `★` badge)
 - `e`: edit selected service
 - `d`: delete selected service
 - `r`: refresh service health + runtime stats

@@ -7,6 +7,7 @@ export interface Service {
   description?: string;
   containerId?: string;
   containerName?: string;
+  bookmarked?: boolean;
 }
 
 export interface Config {
