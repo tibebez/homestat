@@ -8,6 +8,7 @@ export interface Service {
   containerId?: string;
   containerName?: string;
   source?: "docker" | "static";
+  enabled?: boolean;
   group?: string | null;
   bookmarked?: boolean;
   bookmarkedAt?: number | null;

@@ -1,5 +1,15 @@
 import "@opentui/core/runtime-plugin-support";
-import { BoxRenderable, createCliRenderer, type KeyEvent, TextRenderable, t, bold, fg, bg } from "@opentui/core";
+import {
+  BoxRenderable,
+  createCliRenderer,
+  type KeyEvent,
+  type PasteEvent,
+  TextRenderable,
+  t,
+  bold,
+  fg,
+  bg,
+} from "@opentui/core";
 import open from "open";
 import { loadConfig, saveConfig } from "./config.ts";
 import {
@@ -16,6 +26,7 @@ import {
   mergeStaticAndDockerServices,
   resolveServiceContainer,
 } from "./docker.ts";
+import type { DockerDiscoveryService } from "./docker.ts";
 import {
   getDistinctGroupNames,
   getServiceGroupLabel,
@@ -27,6 +38,7 @@ import type { Service, ServiceHealth } from "./types.ts";
 const COLORS = {
   online: "#22c55e",
   offline: "#ef4444",
+  warning: "#f59e0b",
   unknown: "#6b7280",
   focused: "#c084fc",
   text: "#f9fafb",
@@ -71,6 +83,121 @@ function formFieldLine(
   return `${prefix}${displayValue}`;
 }
 
+function parsePercent(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const match = value.match(/([0-9]*\.?[0-9]+)\s*%/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, parsed));
+}
+
+function parseHumanSizeToBytes(value: string): number | null {
+  const match = value.trim().match(/^([0-9]*\.?[0-9]+)\s*([kmgtp]?i?b)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return null;
+  }
+
+  const unit = match[2].toLowerCase();
+  const multipliers: Record<string, number> = {
+    b: 1,
+    kb: 1_000,
+    mb: 1_000_000,
+    gb: 1_000_000_000,
+    tb: 1_000_000_000_000,
+    pb: 1_000_000_000_000_000,
+    kib: 1_024,
+    mib: 1_048_576,
+    gib: 1_073_741_824,
+    tib: 1_099_511_627_776,
+    pib: 1_125_899_906_842_624,
+  };
+
+  const multiplier = multipliers[unit];
+  if (!multiplier) {
+    return null;
+  }
+
+  return Math.round(amount * multiplier);
+}
+
+function parseUsagePairPercent(usage: string | null): number | null {
+  if (!usage || !usage.includes("/")) {
+    return null;
+  }
+
+  const [usedRaw, totalRaw] = usage.split("/").map((part) => part.trim());
+  if (!usedRaw || !totalRaw) {
+    return null;
+  }
+
+  const used = parseHumanSizeToBytes(usedRaw);
+  const total = parseHumanSizeToBytes(totalRaw);
+
+  if (used === null || total === null || total <= 0) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, (used / total) * 100));
+}
+
+function metricColor(percent: number | null): string {
+  if (percent === null) {
+    return COLORS.text;
+  }
+
+  if (percent >= 85) {
+    return COLORS.offline;
+  }
+
+  if (percent >= 60) {
+    return COLORS.warning;
+  }
+
+  return COLORS.online;
+}
+
+function renderMetricBar(label: string, value: string, percent: number | null, panelWidth: number): string {
+  const contentWidth = Math.max(10, panelWidth - 4);
+  const prefix = `${label}: `;
+
+  if (percent === null) {
+    return prefix + truncate(value, Math.max(3, contentWidth - prefix.length));
+  }
+
+  const boundedPercent = Math.max(0, Math.min(100, percent));
+  const barWidth = Math.max(8, Math.min(18, Math.floor(contentWidth * 0.38)));
+  const filled = Math.round((boundedPercent / 100) * barWidth);
+  const bar = `${"█".repeat(filled)}${"░".repeat(Math.max(0, barWidth - filled))}`;
+  const suffix = ` ${Math.round(boundedPercent)}% ${value}`;
+
+  return truncate(`${prefix}[${bar}]${suffix}`, contentWidth);
+}
+
+function diskSizePercent(bytes: number | null): number | null {
+  if (bytes === null || bytes < 0) {
+    return null;
+  }
+
+  // Visual scale only (not a quota): 20 GiB ~= 100%.
+  const referenceBytes = 20 * 1_073_741_824;
+  return Math.max(0, Math.min(100, (bytes / referenceBytes) * 100));
+}
+
 async function checkService(
   url: string,
 ): Promise<Pick<ServiceHealth, "state" | "errorCode" | "errorDetails">> {
@@ -107,7 +234,9 @@ interface ServiceRuntimeStats {
   containerName: string | null;
   cpuUsage: string | null;
   memoryUsage: string | null;
-  diskUsage: string | null;
+  memoryPercent: string | null;
+  diskSize: string | null;
+  diskSizeBytes: number | null;
   lastCheckedAt: number | null;
   errorCode: string | null;
   errorDetails: string | null;
@@ -120,7 +249,9 @@ function createInitialRuntimeStats(): ServiceRuntimeStats {
     containerName: null,
     cpuUsage: null,
     memoryUsage: null,
-    diskUsage: null,
+    memoryPercent: null,
+    diskSize: null,
+    diskSizeBytes: null,
     lastCheckedAt: null,
     errorCode: null,
     errorDetails: null,
@@ -129,17 +260,25 @@ function createInitialRuntimeStats(): ServiceRuntimeStats {
 
 async function main() {
   const config = await loadConfig();
-  const services = config.services;
+  const configuredServices = config.services;
+  const services = configuredServices.filter((service) => service.source !== "docker" && service.enabled !== false);
 
-  async function saveStaticConfigOnly(): Promise<void> {
-    const staticServices = services
-      .filter((service) => service.source !== "docker")
-      .map((service) => {
-        const { source, ...rest } = service;
-        return rest;
-      });
+  const getConfiguredByContainerId = (service: Pick<Service, "containerId">): Service | null => {
+    const containerId = service.containerId?.trim();
+    if (!containerId) {
+      return null;
+    }
 
-    await saveConfig({ services: staticServices });
+    return configuredServices.find((configured) => configured.containerId?.trim() === containerId) ?? null;
+  };
+
+  const isDisabledByConfig = (service: Pick<Service, "containerId">): boolean => {
+    const configured = getConfiguredByContainerId(service);
+    return configured?.enabled === false;
+  };
+
+  async function saveConfiguredServices(): Promise<void> {
+    await saveConfig({ services: configuredServices });
   }
 
   async function refreshDockerDiscoveredServices(): Promise<void> {
@@ -148,8 +287,51 @@ async function main() {
       return;
     }
 
-    const staticServices = services.filter((service) => service.source !== "docker");
-    const merged = mergeStaticAndDockerServices(staticServices, dockerDiscovery.data);
+    let configChanged = false;
+
+    for (const discovered of dockerDiscovery.data) {
+      const discoveredContainerId = discovered.containerId.trim();
+      if (!discoveredContainerId) {
+        continue;
+      }
+
+      const known = configuredServices.some(
+        (configured) => configured.containerId?.trim() === discoveredContainerId,
+      );
+
+      if (!known) {
+        configuredServices.push({
+          ...discovered,
+          enabled: true,
+        });
+        configChanged = true;
+      }
+    }
+
+    if (configChanged) {
+      await saveConfiguredServices();
+    }
+
+    const enabledStaticServices = configuredServices.filter(
+      (service) => service.source !== "docker" && service.enabled !== false,
+    );
+    const enabledDockerServices: DockerDiscoveryService[] = dockerDiscovery.data
+      .filter((service) => !isDisabledByConfig(service))
+      .map((service) => {
+        const configured = getConfiguredByContainerId(service);
+        if (!configured) {
+          return service;
+        }
+
+        return {
+          ...service,
+          ...configured,
+          source: "docker",
+          containerId: service.containerId,
+          containerName: configured.containerName ?? service.containerName,
+        };
+      });
+    const merged = mergeStaticAndDockerServices(enabledStaticServices, enabledDockerServices);
     services.splice(0, services.length, ...merged);
   }
 
@@ -518,9 +700,10 @@ async function main() {
     serviceName: "",
     url: "",
     containerId: "",
-    iconIndex: 0,
+    icon: ICON_PRESETS[0],
   };
   let groupOptionIndex = -1;
+  let iconOptionIndex = 0;
   let focusedFieldIndex = 0;
   let formError = "";
   let isSubmitting = false;
@@ -552,6 +735,22 @@ async function main() {
     formFields.group = groups[toIndex];
   }
 
+  function syncIconOptionIndex(): void {
+    iconOptionIndex = ICON_PRESETS.findIndex((preset) => preset === formFields.icon);
+  }
+
+  function cycleIconOption(direction: 1 | -1): void {
+    if (ICON_PRESETS.length === 0) {
+      return;
+    }
+
+    const fromIndex = iconOptionIndex >= 0 ? iconOptionIndex : direction > 0 ? -1 : 0;
+    const toIndex = (fromIndex + direction + ICON_PRESETS.length) % ICON_PRESETS.length;
+
+    iconOptionIndex = toIndex;
+    formFields.icon = ICON_PRESETS[toIndex];
+  }
+
   function groupDisplayValue(): string {
     const trimmed = formFields.group.trim();
     const groups = getDistinctGroupNames(services);
@@ -567,28 +766,14 @@ async function main() {
     return `${trimmed} (new)`;
   }
 
-  function groupSuggestionsValue(panelWidth: number): string {
-    const groups = getDistinctGroupNames(services);
-    if (groups.length === 0) {
-      return "No existing groups yet";
-    }
-
-    const query = formFields.group.trim().toLowerCase();
-    const matches = query
-      ? groups.filter((group) => group.toLowerCase().includes(query))
-      : groups;
-
-    const label = matches.length > 0 ? `Groups: ${matches.join(", ")}` : "No matching groups";
-    return truncate(label, Math.max(3, panelWidth - 8));
-  }
-
   function resetForm() {
     formFields.group = "";
     formFields.serviceName = "";
     formFields.url = "";
     formFields.containerId = "";
-    formFields.iconIndex = 0;
+    formFields.icon = ICON_PRESETS[0];
     groupOptionIndex = -1;
+    iconOptionIndex = 0;
     focusedFieldIndex = 0;
     formError = "";
     formMode = "add";
@@ -601,8 +786,9 @@ async function main() {
     formFields.serviceName = service.name;
     formFields.url = service.url;
     formFields.containerId = service.containerId ?? "";
-    formFields.iconIndex = Math.max(0, ICON_PRESETS.indexOf(service.icon ?? "•"));
+    formFields.icon = service.icon ?? ICON_PRESETS[0];
     syncGroupOptionIndex();
+    syncIconOptionIndex();
     focusedFieldIndex = 0;
     formError = "";
     formMode = "edit";
@@ -610,9 +796,17 @@ async function main() {
     isFormActive = true;
   }
 
-  function iconDisplay(): string {
-    const icon = ICON_PRESETS[formFields.iconIndex];
-    return `${icon} (${formFields.iconIndex + 1}/${ICON_PRESETS.length})`;
+  function iconDisplayValue(): string {
+    const trimmed = formFields.icon.trim();
+    if (!trimmed) {
+      return ICON_PRESETS.length > 0 ? `(none) ←/→ presets` : "(none)";
+    }
+
+    if (iconOptionIndex >= 0 && ICON_PRESETS[iconOptionIndex] === formFields.icon) {
+      return `${formFields.icon} (${iconOptionIndex + 1}/${ICON_PRESETS.length})`;
+    }
+
+    return `${formFields.icon} (custom)`;
   }
 
   async function submitForm() {
@@ -638,7 +832,7 @@ async function main() {
         url: formFields.url.trim(),
         containerId: formFields.containerId.trim() || undefined,
         group: normalizedGroup || undefined,
-        icon: ICON_PRESETS[formFields.iconIndex],
+        icon: formFields.icon.trim() || ICON_PRESETS[0],
       };
 
       if (formMode === "edit" && editingIndex >= 0) {
@@ -649,14 +843,19 @@ async function main() {
           return;
         }
 
-        services[editingIndex] = {
-          ...existing,
-          ...serviceData,
-        };
+        const originalContainerId = existing.containerId?.trim();
+        const configured =
+          existing.source === "docker" && originalContainerId
+            ? configuredServices.find((service) => service.containerId?.trim() === originalContainerId) ?? null
+            : null;
 
-        if (services[editingIndex].source !== "docker") {
-          await saveStaticConfigOnly();
+        Object.assign(existing, serviceData);
+
+        if (configured) {
+          Object.assign(configured, serviceData, { source: "docker" });
         }
+
+        await saveConfiguredServices();
 
         isFormActive = false;
         formError = "";
@@ -672,8 +871,10 @@ async function main() {
 
       const firstDockerIndex = services.findIndex((service) => service.source === "docker");
       const insertIndex = firstDockerIndex >= 0 ? firstDockerIndex : services.length;
+      serviceData.enabled = true;
+      configuredServices.push(serviceData);
       services.splice(insertIndex, 0, serviceData);
-      await saveStaticConfigOnly();
+      await saveConfiguredServices();
 
       isFormActive = false;
       selectedIndex = insertIndex;
@@ -693,11 +894,32 @@ async function main() {
     if (index < 0 || index >= services.length) return;
 
     const service = services[index];
-    services.splice(index, 1);
-
-    if (service?.source !== "docker") {
-      await saveStaticConfigOnly();
+    if (!service) {
+      return;
     }
+
+    service.enabled = false;
+
+    if (service.source === "docker") {
+      const containerId = service.containerId?.trim();
+      if (containerId) {
+        const configuredDockerService = configuredServices.find(
+          (configured) => configured.containerId?.trim() === containerId,
+        );
+
+        if (configuredDockerService) {
+          configuredDockerService.enabled = false;
+        } else {
+          configuredServices.push({
+            ...service,
+            enabled: false,
+          });
+        }
+      }
+    }
+
+    services.splice(index, 1);
+    await saveConfiguredServices();
 
     syncStateWithServices();
 
@@ -716,26 +938,52 @@ async function main() {
     if (index < 0 || index >= services.length) return;
 
     const service = services[index];
-    if (!service || service.source === "docker") {
+    if (!service) {
       return;
+    }
+
+    let configuredTarget: Service | null = null;
+
+    if (service.source === "docker") {
+      configuredTarget = getConfiguredByContainerId(service);
+      if (!configuredTarget) {
+        configuredTarget = {
+          ...service,
+          enabled: service.enabled ?? true,
+        };
+        configuredServices.push(configuredTarget);
+      }
     }
 
     const previousBookmarked = service.bookmarked;
     const previousBookmarkedAt = service.bookmarkedAt;
+    const previousConfiguredBookmarked = configuredTarget?.bookmarked;
+    const previousConfiguredBookmarkedAt = configuredTarget?.bookmarkedAt;
 
     const nextBookmarked = !service.bookmarked;
     service.bookmarked = nextBookmarked;
     service.bookmarkedAt = nextBookmarked ? Date.now() : null;
 
+    if (configuredTarget) {
+      configuredTarget.bookmarked = service.bookmarked;
+      configuredTarget.bookmarkedAt = service.bookmarkedAt;
+    }
+
     // Optimistic UI update so grouped bookmark ordering reflows immediately.
     safeRender();
 
     try {
-      await saveStaticConfigOnly();
+      await saveConfiguredServices();
     } catch (error) {
       // Restore in-memory state before escalating this persistence failure.
       service.bookmarked = previousBookmarked;
       service.bookmarkedAt = previousBookmarkedAt;
+
+      if (configuredTarget) {
+        configuredTarget.bookmarked = previousConfiguredBookmarked;
+        configuredTarget.bookmarkedAt = previousConfiguredBookmarkedAt;
+      }
+
       safeRender();
 
       const message = error instanceof Error ? error.message : String(error);
@@ -832,39 +1080,39 @@ async function main() {
 
     if (isFormActive) {
       const FIELDS = {
-        group: 0,
-        serviceName: 1,
-        url: 2,
-        containerId: 3,
-        icon: 4,
+        serviceName: 0,
+        url: 1,
+        group: 2,
+        icon: 3,
+        containerId: 4,
         save: 5,
       };
 
       detailsTitle.content = formMode === "edit" ? "✎ Edit Service" : "+ Add New Service";
       detailsTitle.fg = COLORS.focused;
 
-      const groupFocused = focusedFieldIndex === FIELDS.group;
-      detailsUrl.content = formFieldLine("Group", groupDisplayValue(), groupFocused, pw);
-      detailsUrl.fg = groupFocused ? COLORS.focused : COLORS.text;
-
-      detailsHealth.content = `  ${groupSuggestionsValue(pw)}`;
-      detailsHealth.fg = COLORS.muted;
-
       const serviceNameFocused = focusedFieldIndex === FIELDS.serviceName;
-      detailsChecked.content = formFieldLine("Name", formFields.serviceName, serviceNameFocused, pw);
-      detailsChecked.fg = serviceNameFocused ? COLORS.focused : COLORS.text;
+      detailsUrl.content = formFieldLine("Name", formFields.serviceName, serviceNameFocused, pw);
+      detailsUrl.fg = serviceNameFocused ? COLORS.focused : COLORS.text;
 
       const urlFocused = focusedFieldIndex === FIELDS.url;
-      detailsError.content = formFieldLine("URL", formFields.url, urlFocused, pw);
-      detailsError.fg = urlFocused ? COLORS.focused : COLORS.text;
+      detailsHealth.content = formFieldLine("URL", formFields.url, urlFocused, pw);
+      detailsHealth.fg = urlFocused ? COLORS.focused : COLORS.text;
+
+      const groupFocused = focusedFieldIndex === FIELDS.group;
+      detailsChecked.content = formFieldLine("Group", groupDisplayValue(), groupFocused, pw);
+      detailsChecked.fg = groupFocused ? COLORS.focused : COLORS.text;
+
+      const iconFocused = focusedFieldIndex === FIELDS.icon;
+      detailsError.content = formFieldLine("Icon", iconDisplayValue(), iconFocused, pw);
+      detailsError.fg = iconFocused ? COLORS.focused : COLORS.text;
 
       const containerIdFocused = focusedFieldIndex === FIELDS.containerId;
       detailsRuntime.content = formFieldLine("Container ID", formFields.containerId, containerIdFocused, pw);
       detailsRuntime.fg = containerIdFocused ? COLORS.focused : COLORS.text;
 
-      const iconFocused = focusedFieldIndex === FIELDS.icon;
-      detailsCpu.content = formFieldLine("Icon", iconDisplay(), iconFocused, pw);
-      detailsCpu.fg = iconFocused ? COLORS.focused : COLORS.text;
+      detailsCpu.content = "";
+      detailsCpu.fg = COLORS.text;
 
       if (formError) {
         const errorPrefix = "Error: ";
@@ -879,7 +1127,7 @@ async function main() {
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "↑/↓ fields • ←/→ group/icon • Type group/name/url/container • Enter save • Esc cancel";
+      footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type/paste name/url/group/icon/container • Enter save • Esc cancel";
     } else if (activeServiceIndexes.length === 0) {
       detailsTitle.content = "No Services Yet";
       detailsTitle.fg = COLORS.focused;
@@ -935,9 +1183,6 @@ async function main() {
       detailsError.fg = COLORS.text;
 
       const runtimePrefix = "Runtime: ";
-      const cpuPrefix = "CPU: ";
-      const ramPrefix = "RAM: ";
-      const diskPrefix = "Disk: ";
 
       if (selectedRuntime.state === "available") {
         const runtimeLabel = selectedRuntime.containerName
@@ -946,23 +1191,26 @@ async function main() {
         detailsRuntime.content = runtimePrefix + truncate(runtimeLabel, Math.max(3, contentWidth - runtimePrefix.length));
         detailsRuntime.fg = COLORS.text;
 
-        detailsCpu.content = cpuPrefix + truncate(selectedRuntime.cpuUsage ?? "-", Math.max(3, contentWidth - cpuPrefix.length));
-        detailsCpu.fg = COLORS.text;
+        const cpuPercent = parsePercent(selectedRuntime.cpuUsage);
+        detailsCpu.content = renderMetricBar("CPU", selectedRuntime.cpuUsage ?? "-", cpuPercent, pw);
+        detailsCpu.fg = metricColor(cpuPercent);
 
-        detailsRam.content = ramPrefix + truncate(selectedRuntime.memoryUsage ?? "-", Math.max(3, contentWidth - ramPrefix.length));
-        detailsRam.fg = COLORS.text;
+        const ramPercent = parsePercent(selectedRuntime.memoryPercent) ?? parseUsagePairPercent(selectedRuntime.memoryUsage);
+        detailsRam.content = renderMetricBar("RAM", selectedRuntime.memoryUsage ?? "-", ramPercent, pw);
+        detailsRam.fg = metricColor(ramPercent);
 
-        detailsDisk.content = diskPrefix + truncate(selectedRuntime.diskUsage ?? "-", Math.max(3, contentWidth - diskPrefix.length));
-        detailsDisk.fg = COLORS.text;
+        const diskPercent = diskSizePercent(selectedRuntime.diskSizeBytes);
+        detailsDisk.content = renderMetricBar("Disk", selectedRuntime.diskSize ?? "-", diskPercent, pw);
+        detailsDisk.fg = metricColor(diskPercent);
       } else if (selectedRuntime.state === "not-applicable") {
         detailsRuntime.content = runtimePrefix + truncate("N/A (non-local service)", Math.max(3, contentWidth - runtimePrefix.length));
         detailsRuntime.fg = COLORS.muted;
 
-        detailsCpu.content = cpuPrefix + "-";
+        detailsCpu.content = "CPU: -";
         detailsCpu.fg = COLORS.muted;
-        detailsRam.content = ramPrefix + "-";
+        detailsRam.content = "RAM: -";
         detailsRam.fg = COLORS.muted;
-        detailsDisk.content = diskPrefix + "-";
+        detailsDisk.content = "Disk: -";
         detailsDisk.fg = COLORS.muted;
       } else if (selectedRuntime.state === "unavailable") {
         const runtimeMessage =
@@ -970,37 +1218,31 @@ async function main() {
             ? "No container linked"
             : selectedRuntime.errorCode === "DOCKER_DAEMON_UNAVAILABLE" || selectedRuntime.errorCode === "DOCKER_NOT_INSTALLED"
               ? "Docker unavailable"
-              : "Docker stats unavailable";
+              : "Docker runtime unavailable";
 
         detailsRuntime.content = runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
         detailsRuntime.fg = COLORS.offline;
 
-        detailsCpu.content = cpuPrefix + "-";
+        detailsCpu.content = "CPU: -";
         detailsCpu.fg = COLORS.muted;
-        detailsRam.content = ramPrefix + "-";
+        detailsRam.content = "RAM: -";
         detailsRam.fg = COLORS.muted;
-        detailsDisk.content = diskPrefix + "-";
+        detailsDisk.content = "Disk: -";
         detailsDisk.fg = COLORS.muted;
       } else {
         detailsRuntime.content = runtimePrefix + "loading…";
         detailsRuntime.fg = COLORS.muted;
 
-        detailsCpu.content = cpuPrefix + "-";
+        detailsCpu.content = "CPU: -";
         detailsCpu.fg = COLORS.muted;
-        detailsRam.content = ramPrefix + "-";
+        detailsRam.content = "RAM: -";
         detailsRam.fg = COLORS.muted;
-        detailsDisk.content = diskPrefix + "-";
+        detailsDisk.content = "Disk: -";
         detailsDisk.fg = COLORS.muted;
       }
 
-      const runtimeHint =
-        selectedRuntime.state === "available"
-          ? " • docker stats synced"
-          : selectedRuntime.state === "unavailable"
-            ? " • docker stats unavailable"
-            : "";
 
-      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit${runtimeHint}`;
+      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit`;
     }
   };
 
@@ -1039,7 +1281,9 @@ async function main() {
         containerName: runtimeResult.data.stats.containerName,
         cpuUsage: runtimeResult.data.stats.cpuUsage,
         memoryUsage: runtimeResult.data.stats.memoryUsage,
-        diskUsage: runtimeResult.data.stats.diskUsage,
+        memoryPercent: runtimeResult.data.stats.memoryPercent,
+        diskSize: runtimeResult.data.stats.diskSize,
+        diskSizeBytes: runtimeResult.data.stats.diskSizeBytes,
         lastCheckedAt: runtimeResult.data.stats.collectedAt,
         errorCode: null,
         errorDetails: null,
@@ -1054,7 +1298,9 @@ async function main() {
         containerName: null,
         cpuUsage: null,
         memoryUsage: null,
-        diskUsage: null,
+        memoryPercent: null,
+        diskSize: null,
+        diskSizeBytes: null,
         lastCheckedAt: Date.now(),
         errorCode: runtimeResult.error.code,
         errorDetails: runtimeResult.error.message,
@@ -1068,7 +1314,9 @@ async function main() {
       containerName: null,
       cpuUsage: null,
       memoryUsage: null,
-      diskUsage: null,
+      memoryPercent: null,
+      diskSize: null,
+      diskSizeBytes: null,
       lastCheckedAt: Date.now(),
       errorCode: runtimeResult.error.code,
       errorDetails: runtimeResult.error.details ?? runtimeResult.error.message,
@@ -1105,7 +1353,7 @@ async function main() {
 
     service.containerId = nextContainerId;
     service.containerName = nextContainerName;
-    await saveStaticConfigOnly();
+    await saveConfiguredServices();
   };
 
   const refreshServiceAndDetectContainer = async (index: number): Promise<void> => {
@@ -1178,7 +1426,41 @@ async function main() {
     process.exit(1);
   };
 
-  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2 || index === 3;
+  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2 || index === 3 || index === 4;
+
+  const appendTextToFocusedField = (rawText: string): void => {
+    const normalized = rawText.replace(/[\r\n]+/g, "");
+    if (!normalized) {
+      return;
+    }
+
+    if (focusedFieldIndex === 0) {
+      formFields.serviceName += normalized;
+      return;
+    }
+
+    if (focusedFieldIndex === 1) {
+      formFields.url += normalized;
+      return;
+    }
+
+    if (focusedFieldIndex === 2) {
+      formFields.group += normalized;
+      syncGroupOptionIndex();
+      return;
+    }
+
+    if (focusedFieldIndex === 3) {
+      const isPresetSelected = iconOptionIndex >= 0 && ICON_PRESETS[iconOptionIndex] === formFields.icon;
+      formFields.icon = isPresetSelected ? normalized : `${formFields.icon}${normalized}`;
+      syncIconOptionIndex();
+      return;
+    }
+
+    if (focusedFieldIndex === 4) {
+      formFields.containerId += normalized;
+    }
+  };
 
   const nextField = (): void => {
     const max = 5;
@@ -1189,6 +1471,8 @@ async function main() {
     const max = 5;
     focusedFieldIndex = (focusedFieldIndex - 1 + max + 1) % (max + 1);
   };
+
+  const textDecoder = new TextDecoder();
 
   renderer.keyInput.on("keypress", (event: KeyEvent) => {
     if (event.ctrl && event.name === "c") {
@@ -1228,29 +1512,29 @@ async function main() {
         return;
       }
 
-      if (event.name === "left" && focusedFieldIndex === 0) {
+      if (event.name === "left" && focusedFieldIndex === 2) {
         cycleGroupOption(-1);
         safeRender();
         event.preventDefault();
         return;
       }
 
-      if (event.name === "right" && focusedFieldIndex === 0) {
+      if (event.name === "right" && focusedFieldIndex === 2) {
         cycleGroupOption(1);
         safeRender();
         event.preventDefault();
         return;
       }
 
-      if (event.name === "left" && focusedFieldIndex === 4) {
-        formFields.iconIndex = (formFields.iconIndex - 1 + ICON_PRESETS.length) % ICON_PRESETS.length;
+      if (event.name === "left" && focusedFieldIndex === 3) {
+        cycleIconOption(-1);
         safeRender();
         event.preventDefault();
         return;
       }
 
-      if (event.name === "right" && focusedFieldIndex === 4) {
-        formFields.iconIndex = (formFields.iconIndex + 1) % ICON_PRESETS.length;
+      if (event.name === "right" && focusedFieldIndex === 3) {
+        cycleIconOption(1);
         safeRender();
         event.preventDefault();
         return;
@@ -1267,13 +1551,16 @@ async function main() {
       if (event.name === "backspace") {
         if (isTextField(focusedFieldIndex)) {
           if (focusedFieldIndex === 0) {
+            formFields.serviceName = formFields.serviceName.slice(0, -1);
+          } else if (focusedFieldIndex === 1) {
+            formFields.url = formFields.url.slice(0, -1);
+          } else if (focusedFieldIndex === 2) {
             formFields.group = formFields.group.slice(0, -1);
             syncGroupOptionIndex();
-          } else if (focusedFieldIndex === 1) {
-            formFields.serviceName = formFields.serviceName.slice(0, -1);
-          } else if (focusedFieldIndex === 2) {
-            formFields.url = formFields.url.slice(0, -1);
           } else if (focusedFieldIndex === 3) {
+            formFields.icon = formFields.icon.slice(0, -1);
+            syncIconOptionIndex();
+          } else if (focusedFieldIndex === 4) {
             formFields.containerId = formFields.containerId.slice(0, -1);
           }
           safeRender();
@@ -1282,23 +1569,9 @@ async function main() {
         return;
       }
 
-      if (
-        event.sequence.length === 1 &&
-        event.sequence.charCodeAt(0) >= 32 &&
-        !event.ctrl &&
-        !event.meta
-      ) {
+      if (event.sequence && !event.ctrl && !event.meta && !/[\x00-\x1F\x7F]/.test(event.sequence)) {
         if (isTextField(focusedFieldIndex)) {
-          if (focusedFieldIndex === 0) {
-            formFields.group += event.sequence;
-            syncGroupOptionIndex();
-          } else if (focusedFieldIndex === 1) {
-            formFields.serviceName += event.sequence;
-          } else if (focusedFieldIndex === 2) {
-            formFields.url += event.sequence;
-          } else if (focusedFieldIndex === 3) {
-            formFields.containerId += event.sequence;
-          }
+          appendTextToFocusedField(event.sequence);
           safeRender();
         }
         event.preventDefault();
@@ -1396,11 +1669,22 @@ async function main() {
     }
 
     if ((event.sequence === "r" || event.name === "r") && !event.ctrl && !event.meta) {
-      void refreshHealth(true);
+      void refreshHealth(true).catch((error) => failFast(error, "manual refresh failure"));
       event.preventDefault();
       return;
     }
 
+  });
+
+  renderer.keyInput.on("paste", (event: PasteEvent) => {
+    if (!isFormActive || !isTextField(focusedFieldIndex)) {
+      event.preventDefault();
+      return;
+    }
+
+    appendTextToFocusedField(textDecoder.decode(event.bytes));
+    safeRender();
+    event.preventDefault();
   });
 
   process.once("SIGINT", exitGracefully);

@@ -45,6 +45,11 @@ function assertConfig(data: unknown): asserts data is Config {
       throw new Error(`Service '${name}' has an invalid source; expected 'docker', 'static', or undefined.`);
     }
 
+    const enabled = (service as { enabled?: unknown }).enabled;
+    if (enabled !== undefined && typeof enabled !== "boolean") {
+      throw new Error(`Service '${name}' has an invalid enabled flag; expected a boolean.`);
+    }
+
     const group = (service as { group?: unknown }).group;
     if (group !== undefined && group !== null && typeof group !== "string") {
       throw new Error(`Service '${name}' has an invalid group; expected a string, null, or undefined.`);

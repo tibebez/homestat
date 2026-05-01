@@ -48,6 +48,8 @@ export interface DockerContainerStats {
   memoryUsage: string;
   memoryPercent: string | null;
   diskUsage: string;
+  diskSize: string | null;
+  diskSizeBytes: number | null;
   networkIO: string | null;
   pids: string | null;
   collectedAt: number;
@@ -252,6 +254,142 @@ function readRequiredString(record: Record<string, unknown>, key: string): strin
 
 function normalizeContainerIdentifier(value: string): string {
   return value.trim();
+}
+
+function parseHumanSizeToBytes(value: string): number | null {
+  const match = value.trim().match(/^([0-9]*\.?[0-9]+)\s*([kmgtp]?i?b)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return null;
+  }
+
+  const unit = match[2].toLowerCase();
+  const multipliers: Record<string, number> = {
+    b: 1,
+    kb: 1_000,
+    mb: 1_000_000,
+    gb: 1_000_000_000,
+    tb: 1_000_000_000_000,
+    pb: 1_000_000_000_000_000,
+    kib: 1_024,
+    mib: 1_048_576,
+    gib: 1_073_741_824,
+    tib: 1_099_511_627_776,
+    pib: 1_125_899_906_842_624,
+  };
+
+  const multiplier = multipliers[unit];
+  if (!multiplier) {
+    return null;
+  }
+
+  return Math.round(amount * multiplier);
+}
+
+function parseWritableSize(sizeField: string): { size: string; sizeBytes: number | null } | null {
+  const trimmed = sizeField.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const writable = trimmed.split("(")[0]?.trim() ?? trimmed;
+  if (!writable) {
+    return null;
+  }
+
+  return {
+    size: writable,
+    sizeBytes: parseHumanSizeToBytes(writable),
+  };
+}
+
+function parseDockerPsSizeLine(line: string): { id: string; name: string; size: string; sizeBytes: number | null } | null {
+  const parts = line.split("\t");
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const id = parts[0]?.trim() ?? "";
+  const name = parts[1]?.trim() ?? "";
+  const sizeRaw = parts.slice(2).join("\t").trim();
+
+  if (!id || !name || !sizeRaw) {
+    return null;
+  }
+
+  const parsedSize = parseWritableSize(sizeRaw);
+  if (!parsedSize) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    size: parsedSize.size,
+    sizeBytes: parsedSize.sizeBytes,
+  };
+}
+
+async function fetchDockerContainerDiskSize(
+  containerIdOrName: string,
+): Promise<DockerResult<{ size: string; sizeBytes: number | null }>> {
+  const containerRef = normalizeContainerIdentifier(containerIdOrName);
+  if (!containerRef) {
+    return failure("CONTAINER_NOT_FOUND", "Container identifier is empty.", null);
+  }
+
+  const argsById = [
+    "ps",
+    "--size",
+    "--no-trunc",
+    "--filter",
+    `id=${containerRef}`,
+    "--format",
+    "{{.ID}}\t{{.Names}}\t{{.Size}}",
+  ];
+
+  const byId = await runDocker(argsById);
+  if (!byId.ok) {
+    return byId;
+  }
+
+  let parsed = parseDockerPsSizeLine(firstNonEmptyLine(byId.data.stdout) ?? "");
+
+  if (!parsed) {
+    const argsByName = [
+      "ps",
+      "--size",
+      "--no-trunc",
+      "--filter",
+      `name=${containerRef}`,
+      "--format",
+      "{{.ID}}\t{{.Names}}\t{{.Size}}",
+    ];
+
+    const byName = await runDocker(argsByName);
+    if (!byName.ok) {
+      return byName;
+    }
+
+    parsed = parseDockerPsSizeLine(firstNonEmptyLine(byName.data.stdout) ?? "");
+  }
+
+  if (!parsed) {
+    return failure(
+      "CONTAINER_NOT_FOUND",
+      `Docker container '${containerRef}' was not found.`,
+      null,
+    );
+  }
+
+  return success({
+    size: parsed.size,
+    sizeBytes: parsed.sizeBytes,
+  });
 }
 
 function parseDockerLabelString(value: string): Record<string, string> {
@@ -605,6 +743,8 @@ export function parseDockerStatsJsonLine(
     memoryUsage,
     memoryPercent: readOptionalString(record, "MemPerc"),
     diskUsage,
+    diskSize: null,
+    diskSizeBytes: null,
     networkIO: readOptionalString(record, "NetIO"),
     pids: readOptionalString(record, "PIDs"),
     collectedAt,
@@ -655,7 +795,21 @@ export async function fetchDockerContainerStats(
     return statsResult;
   }
 
-  return parseDockerStatsOutput(statsResult.data.stdout);
+  const parsedStats = parseDockerStatsOutput(statsResult.data.stdout);
+  if (!parsedStats.ok) {
+    return parsedStats;
+  }
+
+  const diskSizeResult = await fetchDockerContainerDiskSize(containerRef);
+  if (diskSizeResult.ok) {
+    return success({
+      ...parsedStats.data,
+      diskSize: diskSizeResult.data.size,
+      diskSizeBytes: diskSizeResult.data.sizeBytes,
+    });
+  }
+
+  return success(parsedStats.data);
 }
 
 export async function getServiceDockerStats(

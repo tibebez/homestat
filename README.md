@@ -23,7 +23,8 @@ Create `~/.homestat/config.json`:
     {
       "name": "Jellyfin",
       "url": "http://localhost:8096",
-      "icon": "🎬"
+      "icon": "🎬",
+      "enabled": true
     },
     {
       "name": "Jellyseerr",
@@ -49,7 +50,7 @@ Create `~/.homestat/config.json`:
 - `o`: open selected service in browser
 - `b`: toggle bookmark on selected service (shows a subtle `★` badge)
 - `e`: edit selected service
-- `d`: delete selected service
+- `d`: disable selected service (`enabled: false` in config)
 - `r`: refresh service health + runtime stats
 - `Ctrl+C`: quit
 
@@ -76,4 +77,6 @@ For each matching container, homestat creates a temporary service (`source: "doc
 - fallback URL: `http://localhost:<published-port>`
 - fallback icon: `🐳`
 
-Discovered services are merged with static `~/.homestat/config.json` services and deduped by container ID. They are not written back to config.
+Discovered services are merged with static `~/.homestat/config.json` services and deduped by container ID.
+
+Discovered containers are also tracked in config with `enabled: true` the first time they are seen. Disabled services (`enabled: false`) are hidden from the dashboard (including docker-discovered containers with matching `containerId`).
