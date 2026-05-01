@@ -11,6 +11,12 @@ import {
   relativeTime,
 } from "./health.ts";
 import { getServiceDockerStats, resolveServiceContainer } from "./docker.ts";
+import {
+  getDistinctGroupNames,
+  getServiceGroupLabel,
+  getServicesForView,
+  type ServiceListView,
+} from "./services.ts";
 import type { Service, ServiceHealth } from "./types.ts";
 
 const COLORS = {
@@ -28,6 +34,8 @@ const COLORS = {
 } as const;
 
 const ICON_PRESETS = ["•", "🐳", "⚡", "🚀", "🗄️", "🌐", "🔒", "📊", "💾", "🔧", "📡", "🖥️"];
+const ALL_SERVICES_TITLE = "All Services";
+
 
 function truncate(value: string, length: number): string {
   if (value.length <= length) {
@@ -146,7 +154,7 @@ async function main() {
     width: "68%",
     height: "100%",
     border: true,
-    title: "Services",
+    title: ALL_SERVICES_TITLE,
     padding: 1,
   });
 
@@ -332,25 +340,175 @@ async function main() {
   const runtimeStats = services.map(() => createInitialRuntimeStats());
   let selectedIndex = 0;
   let scrollRowOffset = 0;
+  let currentView: ServiceListView = { kind: "all" };
+
+  function getViewCycleOrder(): ServiceListView[] {
+    const groupNames = getDistinctGroupNames(services);
+    const groupViews = groupNames.map<ServiceListView>((groupName) => ({
+      kind: "group",
+      groupName,
+    }));
+    return [{ kind: "all" }, ...groupViews];
+  }
+
+  function normalizeView(): void {
+    if (currentView.kind === "all") {
+      return;
+    }
+
+    const exists = getDistinctGroupNames(services).includes(currentView.groupName);
+    if (!exists) {
+      currentView = { kind: "all" };
+    }
+  }
+
+  function getActiveServiceIndexes(): number[] {
+    normalizeView();
+
+    const ordered = getServicesForView(services, currentView);
+    const byService = new Map(services.map((service, index) => [service, index] as const));
+    return ordered
+      .map((service) => byService.get(service))
+      .filter((index): index is number => index !== undefined);
+  }
+
+  function getCurrentServicesPanelTitle(): string {
+    if (currentView.kind === "all") {
+      return ALL_SERVICES_TITLE;
+    }
+
+    return `Group: ${currentView.groupName}`;
+  }
+
+  function ensureSelectionWithinActive(activeIndexes: number[]): void {
+    if (activeIndexes.length === 0) {
+      selectedIndex = 0;
+      scrollRowOffset = 0;
+      return;
+    }
+
+    if (!activeIndexes.includes(selectedIndex)) {
+      selectedIndex = activeIndexes[0];
+      scrollRowOffset = 0;
+    }
+  }
+
+  function moveSelection(delta: number): void {
+    const activeIndexes = getActiveServiceIndexes();
+    if (activeIndexes.length === 0) {
+      return;
+    }
+
+    ensureSelectionWithinActive(activeIndexes);
+
+    const currentPosition = activeIndexes.indexOf(selectedIndex);
+    const nextPosition = (currentPosition + delta + activeIndexes.length) % activeIndexes.length;
+    selectedIndex = activeIndexes[nextPosition];
+  }
+
+  function cycleServiceView(): void {
+    const order = getViewCycleOrder();
+
+    const currentPosition = order.findIndex((view) => {
+      if (view.kind !== currentView.kind) {
+        return false;
+      }
+
+      if (view.kind === "all" && currentView.kind === "all") {
+        return true;
+      }
+
+      if (view.kind === "group" && currentView.kind === "group") {
+        return view.groupName === currentView.groupName;
+      }
+
+      return false;
+    });
+
+    const from = currentPosition >= 0 ? currentPosition : 0;
+    const next = (from + 1) % order.length;
+    currentView = order[next];
+
+    ensureSelectionWithinActive(getActiveServiceIndexes());
+  }
 
   let isFormActive = false;
   const formFields = {
+    group: "",
     serviceName: "",
     url: "",
     containerId: "",
     iconIndex: 0,
   };
+  let groupOptionIndex = -1;
   let focusedFieldIndex = 0;
   let formError = "";
   let isSubmitting = false;
   let formMode: "add" | "edit" = "add";
   let editingIndex = -1;
 
+  function syncGroupOptionIndex(): void {
+    const groups = getDistinctGroupNames(services);
+    const group = formFields.group.trim();
+
+    if (!group) {
+      groupOptionIndex = -1;
+      return;
+    }
+
+    groupOptionIndex = groups.findIndex((existing) => existing === group);
+  }
+
+  function cycleGroupOption(direction: 1 | -1): void {
+    const groups = getDistinctGroupNames(services);
+    if (groups.length === 0) {
+      return;
+    }
+
+    const fromIndex = groupOptionIndex >= 0 ? groupOptionIndex : direction > 0 ? -1 : 0;
+    const toIndex = (fromIndex + direction + groups.length) % groups.length;
+
+    groupOptionIndex = toIndex;
+    formFields.group = groups[toIndex];
+  }
+
+  function groupDisplayValue(): string {
+    const trimmed = formFields.group.trim();
+    const groups = getDistinctGroupNames(services);
+
+    if (!trimmed) {
+      return groups.length > 0 ? "(none) ←/→ existing" : "(none)";
+    }
+
+    if (groupOptionIndex >= 0 && groups[groupOptionIndex] === trimmed) {
+      return `${trimmed} (${groupOptionIndex + 1}/${groups.length})`;
+    }
+
+    return `${trimmed} (new)`;
+  }
+
+  function groupSuggestionsValue(panelWidth: number): string {
+    const groups = getDistinctGroupNames(services);
+    if (groups.length === 0) {
+      return "No existing groups yet";
+    }
+
+    const query = formFields.group.trim().toLowerCase();
+    const matches = query
+      ? groups.filter((group) => group.toLowerCase().includes(query))
+      : groups;
+
+    const label = matches.length > 0 ? `Groups: ${matches.join(", ")}` : "No matching groups";
+    return truncate(label, Math.max(3, panelWidth - 8));
+  }
+
   function resetForm() {
+    formFields.group = "";
     formFields.serviceName = "";
     formFields.url = "";
     formFields.containerId = "";
     formFields.iconIndex = 0;
+    groupOptionIndex = -1;
     focusedFieldIndex = 0;
     formError = "";
     formMode = "add";
@@ -359,10 +517,12 @@ async function main() {
 
   function startEditForm(index: number) {
     const service = services[index];
+    formFields.group = (service.group ?? "").trim();
     formFields.serviceName = service.name;
     formFields.url = service.url;
     formFields.containerId = service.containerId ?? "";
     formFields.iconIndex = Math.max(0, ICON_PRESETS.indexOf(service.icon ?? "•"));
+    syncGroupOptionIndex();
     focusedFieldIndex = 0;
     formError = "";
     formMode = "edit";
@@ -391,10 +551,13 @@ async function main() {
         return;
       }
 
+      const normalizedGroup = formFields.group.trim();
+
       const serviceData: Service = {
         name: capitalizeFirstLetter(formFields.serviceName),
         url: formFields.url.trim(),
         containerId: formFields.containerId.trim() || undefined,
+        group: normalizedGroup || undefined,
         icon: ICON_PRESETS[formFields.iconIndex],
       };
 
@@ -511,10 +674,27 @@ async function main() {
     if (index < 0 || index >= services.length) return;
 
     const service = config.services[index];
-    service.bookmarked = !service.bookmarked;
-    await saveConfig(config);
+    const previousBookmarked = service.bookmarked;
+    const previousBookmarkedAt = service.bookmarkedAt;
 
+    const nextBookmarked = !service.bookmarked;
+    service.bookmarked = nextBookmarked;
+    service.bookmarkedAt = nextBookmarked ? Date.now() : null;
+
+    // Optimistic UI update so grouped bookmark ordering reflows immediately.
     safeRender();
+
+    try {
+      await saveConfig(config);
+    } catch (error) {
+      // Restore in-memory state before escalating this persistence failure.
+      service.bookmarked = previousBookmarked;
+      service.bookmarkedAt = previousBookmarkedAt;
+      safeRender();
+
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to persist bookmark change: ${message}`);
+    }
   }
 
   const statusText = (state: ServiceHealth["state"]): string => {
@@ -538,33 +718,57 @@ async function main() {
   };
 
   const render = () => {
-    for (const [index, service] of services.entries()) {
-      const rowHealth = health[index];
+    const activeServiceIndexes = getActiveServiceIndexes();
+    ensureSelectionWithinActive(activeServiceIndexes);
+    servicesPanel.title = getCurrentServicesPanelTitle();
+
+    for (const [slotIndex, row] of rowTexts.entries()) {
+      const serviceIndex = activeServiceIndexes[slotIndex];
+
+      if (serviceIndex === undefined) {
+        row.width = 0;
+        row.height = 0;
+        row.padding = 0;
+        row.border = false;
+        cardIconTexts[slotIndex].content = "";
+        cardStatusTexts[slotIndex].content = "";
+        cardBottomTexts[slotIndex].content = "";
+        continue;
+      }
+
+      row.width = "48%";
+      row.height = CARD_HEIGHT;
+      row.padding = 1;
+      row.border = true;
+
+      const service = services[serviceIndex];
+      const rowHealth = health[serviceIndex];
       const icon = service.icon ?? "•";
       const name = truncate(capitalizeFirstLetter(service.name), 20);
       const description = service.description
         ? truncate(service.description, 30)
         : truncate(service.url, 30);
+      const groupLabel = truncate(getServiceGroupLabel(service), 24);
       const badge = statusText(rowHealth.state);
-      const focused = index === selectedIndex;
+      const focused = serviceIndex === selectedIndex;
 
       const iconChunk = fg(COLORS.iconFg)(bg(COLORS.iconBg)(` ${icon} `));
-      cardIconTexts[index].content = t`${iconChunk}`;
+      cardIconTexts[slotIndex].content = t`${iconChunk}`;
 
       const badgeColor = statusColor(rowHealth.state);
-      cardStatusTexts[index].content = service.bookmarked
+      cardStatusTexts[slotIndex].content = service.bookmarked
         ? t`${fg(badgeColor)(`[ ${badge} ]`)} ${fg(COLORS.muted)("★")}`
         : t`${fg(badgeColor)(`[ ${badge} ]`)}`;
 
       const nameColor = focused ? COLORS.focused : COLORS.text;
-      cardBottomTexts[index].content = t`${bold(fg(nameColor)(name))}\n${fg(COLORS.muted)(description)}`;
+      cardBottomTexts[slotIndex].content = t`${bold(fg(nameColor)(name))}\n${fg(COLORS.muted)(`Group: ${groupLabel}`)}\n${fg(COLORS.muted)(description)}`;
 
-      rowTexts[index].borderStyle = focused ? "double" : "single";
-      rowTexts[index].borderColor = focused ? COLORS.cardBorderFocused : COLORS.cardBorder;
+      row.borderStyle = focused ? "double" : "single";
+      row.borderColor = focused ? COLORS.cardBorderFocused : COLORS.cardBorder;
     }
 
-
-    const selectedRow = Math.floor(selectedIndex / CARD_COLUMNS);
+    const activeSelectedPosition = activeServiceIndexes.indexOf(selectedIndex);
+    const selectedRow = Math.floor(Math.max(0, activeSelectedPosition) / CARD_COLUMNS);
     const visibleRows = Math.max(1, Math.floor(cardsViewport.height / CARD_ROW_STRIDE));
 
     if (selectedRow < scrollRowOffset) {
@@ -580,51 +784,55 @@ async function main() {
 
     if (isFormActive) {
       const FIELDS = {
-        serviceName: 0,
-        url: 1,
-        containerId: 2,
-        icon: 3,
-        save: 4,
+        group: 0,
+        serviceName: 1,
+        url: 2,
+        containerId: 3,
+        icon: 4,
+        save: 5,
       };
 
       detailsTitle.content = formMode === "edit" ? "✎ Edit Service" : "+ Add New Service";
       detailsTitle.fg = COLORS.focused;
 
+      const groupFocused = focusedFieldIndex === FIELDS.group;
+      detailsUrl.content = formFieldLine("Group", groupDisplayValue(), groupFocused, pw);
+      detailsUrl.fg = groupFocused ? COLORS.focused : COLORS.text;
+
+      detailsHealth.content = `  ${groupSuggestionsValue(pw)}`;
+      detailsHealth.fg = COLORS.muted;
+
       const serviceNameFocused = focusedFieldIndex === FIELDS.serviceName;
-      detailsUrl.content = formFieldLine("Name", formFields.serviceName, serviceNameFocused, pw);
-      detailsUrl.fg = serviceNameFocused ? COLORS.focused : COLORS.text;
+      detailsChecked.content = formFieldLine("Name", formFields.serviceName, serviceNameFocused, pw);
+      detailsChecked.fg = serviceNameFocused ? COLORS.focused : COLORS.text;
 
       const urlFocused = focusedFieldIndex === FIELDS.url;
-      detailsHealth.content = formFieldLine("URL", formFields.url, urlFocused, pw);
-      detailsHealth.fg = urlFocused ? COLORS.focused : COLORS.text;
+      detailsError.content = formFieldLine("URL", formFields.url, urlFocused, pw);
+      detailsError.fg = urlFocused ? COLORS.focused : COLORS.text;
 
       const containerIdFocused = focusedFieldIndex === FIELDS.containerId;
-      detailsChecked.content = formFieldLine("Container ID", formFields.containerId, containerIdFocused, pw);
-      detailsChecked.fg = containerIdFocused ? COLORS.focused : COLORS.text;
+      detailsRuntime.content = formFieldLine("Container ID", formFields.containerId, containerIdFocused, pw);
+      detailsRuntime.fg = containerIdFocused ? COLORS.focused : COLORS.text;
 
       const iconFocused = focusedFieldIndex === FIELDS.icon;
-      detailsError.content = formFieldLine("Icon", iconDisplay(), iconFocused, pw);
-      detailsError.fg = iconFocused ? COLORS.focused : COLORS.text;
+      detailsCpu.content = formFieldLine("Icon", iconDisplay(), iconFocused, pw);
+      detailsCpu.fg = iconFocused ? COLORS.focused : COLORS.text;
 
       if (formError) {
         const errorPrefix = "Error: ";
-        detailsRuntime.content = errorPrefix + truncate(formError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
-        detailsRuntime.fg = COLORS.offline;
+        detailsRam.content = errorPrefix + truncate(formError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
+        detailsRam.fg = COLORS.offline;
       } else {
         const saveFocused = focusedFieldIndex === FIELDS.save;
-        detailsRuntime.content = `${saveFocused ? "> " : "  "}[Save]`;
-        detailsRuntime.fg = saveFocused ? COLORS.focused : COLORS.muted;
+        detailsRam.content = `${saveFocused ? "> " : "  "}[Save]`;
+        detailsRam.fg = saveFocused ? COLORS.focused : COLORS.muted;
       }
 
-      detailsCpu.content = "";
-      detailsCpu.fg = COLORS.text;
-      detailsRam.content = "";
-      detailsRam.fg = COLORS.text;
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "↑/↓ navigate fields • ←/→ icon • Type to edit • Enter to save • Esc to cancel";
-    } else if (services.length === 0) {
+      footerText.content = "↑/↓ fields • ←/→ group/icon • Type group/name/url/container • Enter save • Esc cancel";
+    } else if (activeServiceIndexes.length === 0) {
       detailsTitle.content = "No Services Yet";
       detailsTitle.fg = COLORS.focused;
 
@@ -649,7 +857,7 @@ async function main() {
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "n new service • r refresh • Ctrl+C quit";
+      footerText.content = "n new service • t toggle view • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
@@ -744,7 +952,7 @@ async function main() {
             ? " • docker stats unavailable"
             : "";
 
-      footerText.content = `←/→/↑/↓ navigate • n new • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit${runtimeHint}`;
+      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit${runtimeHint}`;
     }
   };
 
@@ -910,15 +1118,22 @@ async function main() {
     process.exit(0);
   };
 
-  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2;
+  const failFast = (error: unknown, context: string): never => {
+    const message = error instanceof Error ? error.message : String(error);
+    stop();
+    console.error(`homestat ${context}: ${message}`);
+    process.exit(1);
+  };
+
+  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2 || index === 3;
 
   const nextField = (): void => {
-    const max = 4;
+    const max = 5;
     focusedFieldIndex = (focusedFieldIndex + 1) % (max + 1);
   };
 
   const prevField = (): void => {
-    const max = 4;
+    const max = 5;
     focusedFieldIndex = (focusedFieldIndex - 1 + max + 1) % (max + 1);
   };
 
@@ -960,14 +1175,28 @@ async function main() {
         return;
       }
 
-      if (event.name === "left" && focusedFieldIndex === 3) {
+      if (event.name === "left" && focusedFieldIndex === 0) {
+        cycleGroupOption(-1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "right" && focusedFieldIndex === 0) {
+        cycleGroupOption(1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "left" && focusedFieldIndex === 4) {
         formFields.iconIndex = (formFields.iconIndex - 1 + ICON_PRESETS.length) % ICON_PRESETS.length;
         safeRender();
         event.preventDefault();
         return;
       }
 
-      if (event.name === "right" && focusedFieldIndex === 3) {
+      if (event.name === "right" && focusedFieldIndex === 4) {
         formFields.iconIndex = (formFields.iconIndex + 1) % ICON_PRESETS.length;
         safeRender();
         event.preventDefault();
@@ -975,7 +1204,7 @@ async function main() {
       }
 
       if (event.name === "return" || event.name === "enter") {
-        if (focusedFieldIndex === 4) {
+        if (focusedFieldIndex === 5) {
           void submitForm();
           event.preventDefault();
           return;
@@ -985,10 +1214,13 @@ async function main() {
       if (event.name === "backspace") {
         if (isTextField(focusedFieldIndex)) {
           if (focusedFieldIndex === 0) {
-            formFields.serviceName = formFields.serviceName.slice(0, -1);
+            formFields.group = formFields.group.slice(0, -1);
+            syncGroupOptionIndex();
           } else if (focusedFieldIndex === 1) {
-            formFields.url = formFields.url.slice(0, -1);
+            formFields.serviceName = formFields.serviceName.slice(0, -1);
           } else if (focusedFieldIndex === 2) {
+            formFields.url = formFields.url.slice(0, -1);
+          } else if (focusedFieldIndex === 3) {
             formFields.containerId = formFields.containerId.slice(0, -1);
           }
           safeRender();
@@ -1005,10 +1237,13 @@ async function main() {
       ) {
         if (isTextField(focusedFieldIndex)) {
           if (focusedFieldIndex === 0) {
-            formFields.serviceName += event.sequence;
+            formFields.group += event.sequence;
+            syncGroupOptionIndex();
           } else if (focusedFieldIndex === 1) {
-            formFields.url += event.sequence;
+            formFields.serviceName += event.sequence;
           } else if (focusedFieldIndex === 2) {
+            formFields.url += event.sequence;
+          } else if (focusedFieldIndex === 3) {
             formFields.containerId += event.sequence;
           }
           safeRender();
@@ -1022,37 +1257,29 @@ async function main() {
     }
 
     if (event.name === "left") {
-      if (services.length > 0) {
-        selectedIndex = (selectedIndex - 1 + services.length) % services.length;
-        safeRender();
-      }
+      moveSelection(-1);
+      safeRender();
       event.preventDefault();
       return;
     }
 
     if (event.name === "right") {
-      if (services.length > 0) {
-        selectedIndex = (selectedIndex + 1) % services.length;
-        safeRender();
-      }
+      moveSelection(1);
+      safeRender();
       event.preventDefault();
       return;
     }
 
     if (event.name === "up") {
-      if (services.length > 0) {
-        selectedIndex = (selectedIndex - CARD_COLUMNS + services.length) % services.length;
-        safeRender();
-      }
+      moveSelection(-CARD_COLUMNS);
+      safeRender();
       event.preventDefault();
       return;
     }
 
     if (event.name === "down") {
-      if (services.length > 0) {
-        selectedIndex = (selectedIndex + CARD_COLUMNS) % services.length;
-        safeRender();
-      }
+      moveSelection(CARD_COLUMNS);
+      safeRender();
       event.preventDefault();
       return;
     }
@@ -1065,8 +1292,17 @@ async function main() {
       return;
     }
 
+    if ((event.sequence === "t" || event.name === "t") && !event.ctrl && !event.meta) {
+      cycleServiceView();
+      safeRender();
+      event.preventDefault();
+      return;
+    }
+
     if ((event.sequence === "o" || event.name === "o") && !event.ctrl && !event.meta) {
-      if (services.length > 0) {
+      const active = getActiveServiceIndexes();
+      if (active.length > 0) {
+        ensureSelectionWithinActive(active);
         const selected = services[selectedIndex];
         const normalized = normalizeServiceUrl(selected.url);
         void open(normalized);
@@ -1076,7 +1312,9 @@ async function main() {
     }
 
     if ((event.sequence === "e" || event.name === "e") && !event.ctrl && !event.meta) {
-      if (services.length > 0) {
+      const active = getActiveServiceIndexes();
+      if (active.length > 0) {
+        ensureSelectionWithinActive(active);
         startEditForm(selectedIndex);
         safeRender();
       }
@@ -1085,7 +1323,9 @@ async function main() {
     }
 
     if ((event.sequence === "d" || event.name === "d") && !event.ctrl && !event.meta) {
-      if (services.length > 0) {
+      const active = getActiveServiceIndexes();
+      if (active.length > 0) {
+        ensureSelectionWithinActive(active);
         void deleteService(selectedIndex);
       }
       event.preventDefault();
@@ -1093,8 +1333,10 @@ async function main() {
     }
 
     if ((event.sequence === "b" || event.name === "b") && !event.ctrl && !event.meta) {
-      if (services.length > 0) {
-        void toggleBookmark(selectedIndex);
+      const active = getActiveServiceIndexes();
+      if (active.length > 0) {
+        ensureSelectionWithinActive(active);
+        void toggleBookmark(selectedIndex).catch((error) => failFast(error, "bookmark persistence failure"));
       }
       event.preventDefault();
       return;

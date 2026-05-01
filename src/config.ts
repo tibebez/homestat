@@ -40,9 +40,19 @@ function assertConfig(data: unknown): asserts data is Config {
       throw new Error(`Service '${name}' has an invalid containerName; expected a string.`);
     }
 
+    const group = (service as { group?: unknown }).group;
+    if (group !== undefined && group !== null && typeof group !== "string") {
+      throw new Error(`Service '${name}' has an invalid group; expected a string, null, or undefined.`);
+    }
+
     const bookmarked = (service as { bookmarked?: unknown }).bookmarked;
     if (bookmarked !== undefined && typeof bookmarked !== "boolean") {
       throw new Error(`Service '${name}' has an invalid bookmarked flag; expected a boolean.`);
+    }
+
+    const bookmarkedAt = (service as { bookmarkedAt?: unknown }).bookmarkedAt;
+    if (bookmarkedAt !== undefined && bookmarkedAt !== null && typeof bookmarkedAt !== "number") {
+      throw new Error(`Service '${name}' has an invalid bookmarkedAt value; expected a number, null, or undefined.`);
     }
   }
 }

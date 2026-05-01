@@ -45,6 +45,7 @@ Create `~/.homestat/config.json`:
 
 - `←` / `→` / `↑` / `↓`: navigate cards
 - `n`: add a new service (opens form in details panel)
+- `t`: toggle list view (All Services → each group → back to All Services)
 - `o`: open selected service in browser
 - `b`: toggle bookmark on selected service (shows a subtle `★` badge)
 - `e`: edit selected service

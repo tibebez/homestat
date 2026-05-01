@@ -7,7 +7,9 @@ export interface Service {
   description?: string;
   containerId?: string;
   containerName?: string;
+  group?: string | null;
   bookmarked?: boolean;
+  bookmarkedAt?: number | null;
 }
 
 export interface Config {
