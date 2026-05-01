@@ -239,7 +239,6 @@ async function main() {
   });
 
   addNewCard.add(addNewText);
-  addNewCard.add(addNewHint);
 
   const detailsTitle = new TextRenderable(renderer, {
     id: "details-title",
@@ -308,6 +307,8 @@ async function main() {
   let focusedFieldIndex = 0;
   let formError = "";
   let isSubmitting = false;
+  let formMode: "add" | "edit" = "add";
+  let editingIndex = -1;
 
   function resetForm() {
     formFields.serviceName = "";
@@ -315,6 +316,20 @@ async function main() {
     formFields.iconIndex = 0;
     focusedFieldIndex = 0;
     formError = "";
+    formMode = "add";
+    editingIndex = -1;
+  }
+
+  function startEditForm(index: number) {
+    const service = services[index];
+    formFields.serviceName = service.name;
+    formFields.url = service.url;
+    formFields.iconIndex = Math.max(0, ICON_PRESETS.indexOf(service.icon ?? "•"));
+    focusedFieldIndex = 0;
+    formError = "";
+    formMode = "edit";
+    editingIndex = index;
+    isFormActive = true;
   }
 
   function iconDisplay(): string {
@@ -338,13 +353,34 @@ async function main() {
         return;
       }
 
-      const newService: Service = {
+      const serviceData: Service = {
         name: formFields.serviceName.trim(),
         url: formFields.url.trim(),
         icon: ICON_PRESETS[formFields.iconIndex],
       };
 
-      config.services.push(newService);
+      if (formMode === "edit" && editingIndex >= 0) {
+        config.services[editingIndex] = serviceData;
+        await saveConfig(config);
+
+        isFormActive = false;
+        formError = "";
+        selectedIndex = editingIndex;
+        safeRender();
+
+        void checkService(serviceData.url).then((result) => {
+          health[editingIndex] = {
+            state: result.state,
+            errorCode: result.errorCode,
+            errorDetails: result.errorDetails,
+            lastCheckedAt: Date.now(),
+          };
+          safeRender();
+        });
+        return;
+      }
+
+      config.services.push(serviceData);
       await saveConfig(config);
 
       const newIndex = services.length - 1;
@@ -399,7 +435,7 @@ async function main() {
 
       safeRender();
 
-      void checkService(newService.url).then((result) => {
+      void checkService(serviceData.url).then((result) => {
         health[newIndex] = {
           state: result.state,
           errorCode: result.errorCode,
@@ -411,6 +447,28 @@ async function main() {
     } finally {
       isSubmitting = false;
     }
+  }
+
+  async function deleteService(index: number) {
+    if (index < 0 || index >= services.length) return;
+
+    config.services.splice(index, 1);
+    await saveConfig(config);
+
+    cardsGrid.remove(rowTexts[index].id);
+
+    rowTexts.splice(index, 1);
+    cardHeaderBoxes.splice(index, 1);
+    cardIconTexts.splice(index, 1);
+    cardStatusTexts.splice(index, 1);
+    cardBottomTexts.splice(index, 1);
+    health.splice(index, 1);
+
+    if (selectedIndex > index) {
+      selectedIndex--;
+    }
+
+    safeRender();
   }
 
   const statusText = (state: ServiceHealth["state"]): string => {
@@ -491,7 +549,7 @@ async function main() {
         save: 3,
       };
 
-      detailsTitle.content = "+ Add New Service";
+      detailsTitle.content = formMode === "edit" ? "✎ Edit Service" : "+ Add New Service";
       detailsTitle.fg = COLORS.focused;
 
       const serviceNameFocused = focusedFieldIndex === FIELDS.serviceName;
@@ -533,7 +591,7 @@ async function main() {
       detailsError.content = "";
       detailsError.fg = COLORS.text;
 
-      footerText.content = "←/→/↑/↓ navigate • Enter to open • Ctrl+C quit";
+      footerText.content = "←/→/↑/↓ navigate • Enter to add • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
@@ -559,7 +617,7 @@ async function main() {
       detailsError.content = errorPrefix + truncate(selectedHealth.errorDetails ?? "none", Math.max(3, contentWidth - errorPrefix.length));
       detailsError.fg = COLORS.text;
 
-      footerText.content = "←/→/↑/↓ navigate • Enter to open • Ctrl+C quit";
+      footerText.content = "←/→/↑/↓ navigate • o open • e edit • d delete • r refresh • Ctrl+C quit";
     }
   };
 
@@ -648,7 +706,11 @@ async function main() {
 
       if (event.name === "escape") {
         isFormActive = false;
-        selectedIndex = services.length;
+        if (formMode === "edit" && editingIndex >= 0) {
+          selectedIndex = editingIndex;
+        } else {
+          selectedIndex = services.length;
+        }
         safeRender();
         event.preventDefault();
         return;
@@ -753,6 +815,39 @@ async function main() {
       return;
     }
 
+    if ((event.sequence === "o" || event.name === "o") && !event.ctrl && !event.meta) {
+      if (selectedIndex !== services.length) {
+        const selected = services[selectedIndex];
+        const normalized = normalizeServiceUrl(selected.url);
+        void open(normalized);
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.sequence === "e" || event.name === "e") && !event.ctrl && !event.meta) {
+      if (selectedIndex !== services.length) {
+        startEditForm(selectedIndex);
+        safeRender();
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.sequence === "d" || event.name === "d") && !event.ctrl && !event.meta) {
+      if (selectedIndex !== services.length) {
+        void deleteService(selectedIndex);
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.sequence === "r" || event.name === "r") && !event.ctrl && !event.meta) {
+      void refreshHealth();
+      event.preventDefault();
+      return;
+    }
+
     if (event.name === "return" || event.name === "enter") {
       if (selectedIndex === services.length) {
         isFormActive = true;
@@ -761,11 +856,6 @@ async function main() {
         event.preventDefault();
         return;
       }
-
-      const selected = services[selectedIndex];
-      const normalized = normalizeServiceUrl(selected.url);
-      void open(normalized);
-      event.preventDefault();
     }
   });
 
