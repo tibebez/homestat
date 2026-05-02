@@ -2,6 +2,12 @@
   "name": "homestat",
   "version": "0.1.0",
   "description": "Terminal homepage dashboard for self-hosted services.",
+  "keywords": [
+    "terminal",
+    "dashboard",
+    "self-hosted",
+    "monitoring"
+  ],
   "homepage": "https://github.com/tibebez/homestat#readme",
   "bugs": {
     "url": "https://github.com/tibebez/homestat/issues"
@@ -13,23 +19,32 @@
     "url": "git+https://github.com/tibebez/homestat.git"
   },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
+  "bin": {
+    "homestat": "./bin/homestat.mjs"
+  },
   "type": "module",
   "exports": {
     ".": "./dist/index.mjs",
     "./package.json": "./package.json"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.mjs --format esm",
+    "build": "bun run build:lib && bun run build:cli",
+    "build:lib": "bun build src/index.ts --outfile dist/index.mjs --format esm",
+    "build:cli": "bun build src/cli.ts --outdir dist --format esm --target node",
     "dev": "bun build src/index.ts --outfile dist/index.mjs --format esm --watch",
     "dashboard": "bun run src/cli.ts",
     "test": "bun test",
     "check": "bunx tsc --noEmit",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run check && bun run test && bun run build"
   },
   "dependencies": {
     "@opentui/core": "^0.2.0",
