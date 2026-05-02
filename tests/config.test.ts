@@ -33,33 +33,6 @@ test("accepts services with null or missing group", async () => {
 });
 
 
-test("accepts enabled as boolean", async () => {
-  await withTempConfigFile(
-    {
-      services: [
-        { name: "A", url: "http://localhost:3000", enabled: true },
-        { name: "B", url: "http://localhost:3001", enabled: false },
-      ],
-    },
-    async (path) => {
-      const config = await loadConfig(path);
-      expect(config.services[0].enabled).toBe(true);
-      expect(config.services[1].enabled).toBe(false);
-    },
-  );
-});
-
-test("rejects invalid enabled type", async () => {
-  await withTempConfigFile(
-    {
-      services: [{ name: "A", url: "http://localhost:3000", enabled: "yes" }],
-    },
-    async (path) => {
-      await expect(loadConfig(path)).rejects.toThrow("invalid enabled");
-    },
-  );
-});
-
 test("rejects invalid group type", async () => {
   await withTempConfigFile(
     {

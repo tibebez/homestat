@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   isLocalServiceUrl,
   mapDiscoveredContainersToServices,
-  mergeStaticAndDockerServices,
+  mergeManualAndDockerServices,
   parseDockerStatsJsonLine,
   parseDockerStatsOutput,
 } from "../src/index.ts";
@@ -127,7 +127,7 @@ test("maps discovered docker containers using label overrides and localhost port
   ]);
 
   expect(services[0]).toMatchObject({
-    source: "docker",
+    type: "docker",
     containerId: "abc123",
     containerName: "jellyfin",
     name: "Jellyfin",
@@ -136,7 +136,7 @@ test("maps discovered docker containers using label overrides and localhost port
   });
 
   expect(services[1]).toMatchObject({
-    source: "docker",
+    type: "docker",
     containerId: "def456",
     containerName: "grafana",
     name: "grafana",
@@ -145,15 +145,15 @@ test("maps discovered docker containers using label overrides and localhost port
   });
 });
 
-test("merges static and discovered services, deduping by container id", () => {
-  const merged = mergeStaticAndDockerServices(
+test("merges manual and discovered services, deduping docker by container id", () => {
+  const merged = mergeManualAndDockerServices(
     [
-      { name: "Static Jellyfin", url: "http://localhost:8096", containerId: "abc123" },
-      { name: "Plex", url: "http://localhost:32400" },
+      { type: "manual", name: "Static Jellyfin", url: "http://localhost:8096" },
+      { type: "manual", name: "Plex", url: "http://localhost:32400" },
     ],
     [
       {
-        source: "docker",
+        type: "docker",
         name: "Jellyfin",
         url: "http://localhost:8096",
         icon: "docker",
@@ -161,7 +161,7 @@ test("merges static and discovered services, deduping by container id", () => {
         containerName: "jellyfin",
       },
       {
-        source: "docker",
+        type: "docker",
         name: "Grafana",
         url: "http://localhost:3000",
         icon: "docker",
@@ -174,6 +174,7 @@ test("merges static and discovered services, deduping by container id", () => {
   expect(merged.map((service) => service.name)).toEqual([
     "Static Jellyfin",
     "Plex",
+    "Jellyfin",
     "Grafana",
   ]);
 });

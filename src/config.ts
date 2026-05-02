@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { Config, GlobalSettings } from "./types.ts";
+import type { Config, GlobalSettings, Service, ServiceType } from "./types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".homestat", "config.json");
 export const HOMESTAT_DIR = dirname(CONFIG_PATH);
@@ -13,6 +13,69 @@ export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
   autoRefreshDockerDiscovery: false,
   refreshOnStart: true,
 };
+
+function isValidServiceType(value: unknown): value is ServiceType {
+  return value === "manual" || value === "docker" || value === "widget";
+}
+
+function migrateService(data: unknown): Service {
+  if (!data || typeof data !== "object") {
+    throw new Error("Service must be an object.");
+  }
+
+  const record = data as Record<string, unknown>;
+
+  const name = record.name;
+  const url = record.url;
+  if (typeof name !== "string" || !name.trim()) {
+    throw new Error("Service must have a non-empty name.");
+  }
+  if (typeof url !== "string" || !url.trim()) {
+    throw new Error(`Service '${name}' must have a non-empty url.`);
+  }
+
+  // Migrate legacy 'source' field to 'type'
+  let type: ServiceType = "manual";
+  if (isValidServiceType(record.type)) {
+    type = record.type;
+  } else if (record.source === "docker") {
+    type = "docker";
+  } else if (record.source === "static") {
+    type = "manual";
+  }
+
+  const base = {
+    name: name.trim(),
+    url: url.trim(),
+    icon: record.icon !== undefined ? String(record.icon) : undefined,
+    description: record.description !== undefined ? String(record.description) : undefined,
+    group: record.group !== null && record.group !== undefined ? String(record.group) : (record.group === null ? null : undefined),
+    type,
+  };
+
+  if (type === "docker") {
+    const containerId = record.containerId;
+    const containerName = record.containerName;
+    if (typeof containerId !== "string" || !containerId.trim()) {
+      throw new Error(`Docker service '${name}' must have a non-empty containerId.`);
+    }
+    if (typeof containerName !== "string" || !containerName.trim()) {
+      throw new Error(`Docker service '${name}' must have a non-empty containerName.`);
+    }
+    return {
+      ...base,
+      type: "docker",
+      containerId: containerId.trim(),
+      containerName: containerName.trim(),
+    };
+  }
+
+  if (type === "widget") {
+    return { ...base, type: "widget" };
+  }
+
+  return { ...base, type: "manual" };
+}
 
 function assertConfig(data: unknown): asserts data is { services: unknown[]; settings?: unknown } {
   if (!data || typeof data !== "object") {
@@ -39,6 +102,11 @@ function assertConfig(data: unknown): asserts data is { services: unknown[]; set
       throw new Error(`Service '${name}' must have a non-empty url.`);
     }
 
+    const type = (service as { type?: unknown }).type;
+    if (type !== undefined && !isValidServiceType(type)) {
+      throw new Error(`Service '${name}' has an invalid type; expected 'manual', 'docker', or 'widget'.`);
+    }
+
     const containerId = (service as { containerId?: unknown }).containerId;
     if (containerId !== undefined && typeof containerId !== "string") {
       throw new Error(`Service '${name}' has an invalid containerId; expected a string.`);
@@ -49,21 +117,10 @@ function assertConfig(data: unknown): asserts data is { services: unknown[]; set
       throw new Error(`Service '${name}' has an invalid containerName; expected a string.`);
     }
 
-    const source = (service as { source?: unknown }).source;
-    if (source !== undefined && source !== "docker" && source !== "static") {
-      throw new Error(`Service '${name}' has an invalid source; expected 'docker', 'static', or undefined.`);
-    }
-
-    const enabled = (service as { enabled?: unknown }).enabled;
-    if (enabled !== undefined && typeof enabled !== "boolean") {
-      throw new Error(`Service '${name}' has an invalid enabled flag; expected a boolean.`);
-    }
-
     const group = (service as { group?: unknown }).group;
     if (group !== undefined && group !== null && typeof group !== "string") {
       throw new Error(`Service '${name}' has an invalid group; expected a string, null, or undefined.`);
     }
-
   }
 
   const settings = (data as { settings?: unknown }).settings;
@@ -163,5 +220,9 @@ export async function loadConfig(path = CONFIG_PATH): Promise<Config> {
   }
 
   assertConfig(parsed);
-  return normalizeConfig(parsed as { services: Config["services"]; settings?: Partial<GlobalSettings> });
+
+  const data = parsed as { services: unknown[]; settings?: unknown };
+  const migratedServices = data.services.map(migrateService);
+
+  return normalizeConfig({ services: migratedServices, settings: data.settings as Partial<GlobalSettings> | undefined });
 }

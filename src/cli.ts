@@ -21,17 +21,16 @@ import {
 import {
   discoverHomestatDockerServices,
   getServiceDockerStats,
-  mergeStaticAndDockerServices,
   resolveServiceContainer,
 } from "./docker.ts";
-import type { DockerDiscoveryService } from "./docker.ts";
 import {
   getDistinctGroupNames,
   getServiceGroupLabel,
   getServicesForView,
+  isUngroupedService,
   type ServiceListView,
 } from "./services.ts";
-import type { Service, ServiceHealth } from "./types.ts";
+import type { ManualService, Service, ServiceHealth } from "./types.ts";
 
 const COLORS = {
   online: "#22c55e",
@@ -77,8 +76,8 @@ function fuzzyMatchService(query: string, service: Service): boolean {
     service.url,
     service.group || "",
     service.description || "",
-    service.containerName || "",
-    service.containerId || "",
+    service.type === "docker" ? service.containerName : "",
+    service.type === "docker" ? service.containerId : "",
   ].join(" ").toLowerCase();
 
   let idx = 0;
@@ -313,26 +312,16 @@ async function main() {
   const config = await loadConfig();
   const configuredServices = config.services;
   const globalSettings = { ...config.settings };
-  const services = configuredServices.filter((service) => service.source !== "docker" && service.enabled !== false);
-
-  const getConfiguredByContainerId = (service: Pick<Service, "containerId">): Service | null => {
-    const containerId = service.containerId?.trim();
-    if (!containerId) {
-      return null;
-    }
-
-    return configuredServices.find((configured) => configured.containerId?.trim() === containerId) ?? null;
-  };
-
-  const isDisabledByConfig = (service: Pick<Service, "containerId">): boolean => {
-    const configured = getConfiguredByContainerId(service);
-    return configured?.enabled === false;
-  };
+  const services: Service[] = configuredServices.filter((service) => service.type !== "widget");
 
   async function saveConfiguredState(): Promise<void> {
     await saveConfig({ services: configuredServices, settings: globalSettings });
   }
 
+  function rebuildActiveServices(): void {
+    const active = configuredServices.filter((service) => service.type !== "widget");
+    services.splice(0, services.length, ...active);
+  }
 
   async function refreshDockerDiscoveredServices(): Promise<void> {
     const dockerDiscovery = await discoverHomestatDockerServices("🐳");
@@ -348,15 +337,24 @@ async function main() {
         continue;
       }
 
-      const known = configuredServices.some(
-        (configured) => configured.containerId?.trim() === discoveredContainerId,
+      const existingIndex = configuredServices.findIndex(
+        (configured) => configured.type === "docker" && configured.containerId.trim() === discoveredContainerId,
       );
 
-      if (!known) {
-        configuredServices.push({
-          ...discovered,
-          enabled: true,
-        });
+      if (existingIndex >= 0) {
+        const existing = configuredServices[existingIndex] as Extract<Service, { type: "docker" }>;
+        // Update system fields from live discovery; preserve user customizations
+        existing.containerName = discovered.containerName;
+        existing.url = discovered.url;
+        if (!existing.name || existing.name === discovered.containerId) {
+          existing.name = discovered.name;
+        }
+        if (!existing.icon) {
+          existing.icon = discovered.icon;
+        }
+        configChanged = true;
+      } else {
+        configuredServices.push(discovered);
         configChanged = true;
       }
     }
@@ -365,27 +363,7 @@ async function main() {
       await saveConfiguredState();
     }
 
-    const enabledStaticServices = configuredServices.filter(
-      (service) => service.source !== "docker" && service.enabled !== false,
-    );
-    const enabledDockerServices: DockerDiscoveryService[] = dockerDiscovery.data
-      .filter((service) => !isDisabledByConfig(service))
-      .map((service) => {
-        const configured = getConfiguredByContainerId(service);
-        if (!configured) {
-          return service;
-        }
-
-        return {
-          ...service,
-          ...configured,
-          source: "docker",
-          containerId: service.containerId,
-          containerName: configured.containerName ?? service.containerName,
-        };
-      });
-    const merged = mergeStaticAndDockerServices(enabledStaticServices, enabledDockerServices);
-    services.splice(0, services.length, ...merged);
+    rebuildActiveServices();
   }
 
   await refreshDockerDiscoveredServices();
@@ -777,7 +755,6 @@ async function main() {
     group: "",
     serviceName: "",
     url: "",
-    containerId: "",
     icon: ICON_PRESETS[0],
   };
   let groupOptionIndex = -1;
@@ -954,7 +931,6 @@ async function main() {
     formFields.group = "";
     formFields.serviceName = "";
     formFields.url = "";
-    formFields.containerId = "";
     formFields.icon = ICON_PRESETS[0];
     groupOptionIndex = -1;
     iconOptionIndex = 0;
@@ -969,7 +945,6 @@ async function main() {
     formFields.group = (service.group ?? "").trim();
     formFields.serviceName = service.name;
     formFields.url = service.url;
-    formFields.containerId = service.containerId ?? "";
     formFields.icon = service.icon ?? ICON_PRESETS[0];
     syncGroupOptionIndex();
     syncIconOptionIndex();
@@ -1012,14 +987,6 @@ async function main() {
 
       const normalizedGroup = formFields.group.trim();
 
-      const serviceData: Service = {
-        name: capitalizeFirstLetter(formFields.serviceName),
-        url: formFields.url.trim(),
-        containerId: formFields.containerId.trim() || undefined,
-        group: normalizedGroup || undefined,
-        icon: formFields.icon.trim() || ICON_PRESETS[0],
-      };
-
       if (formMode === "edit" && editingIndex >= 0) {
         const existing = services[editingIndex];
         if (!existing) {
@@ -1028,17 +995,12 @@ async function main() {
           return;
         }
 
-        const originalContainerId = existing.containerId?.trim();
-        const configured =
-          existing.source === "docker" && originalContainerId
-            ? configuredServices.find((service) => service.containerId?.trim() === originalContainerId) ?? null
-            : null;
-
-        Object.assign(existing, serviceData);
-
-        if (configured) {
-          Object.assign(configured, serviceData, { source: "docker" });
-        }
+        Object.assign(existing, {
+          name: capitalizeFirstLetter(formFields.serviceName),
+          url: formFields.url.trim(),
+          group: normalizedGroup || undefined,
+          icon: formFields.icon.trim() || ICON_PRESETS[0],
+        });
 
         await saveConfiguredState();
 
@@ -1054,11 +1016,18 @@ async function main() {
         return;
       }
 
-      const firstDockerIndex = services.findIndex((service) => service.source === "docker");
+      const newService: ManualService = {
+        type: "manual",
+        name: capitalizeFirstLetter(formFields.serviceName),
+        url: formFields.url.trim(),
+        group: normalizedGroup || undefined,
+        icon: formFields.icon.trim() || ICON_PRESETS[0],
+      };
+
+      const firstDockerIndex = services.findIndex((service) => service.type === "docker");
       const insertIndex = firstDockerIndex >= 0 ? firstDockerIndex : services.length;
-      serviceData.enabled = true;
-      configuredServices.push(serviceData);
-      services.splice(insertIndex, 0, serviceData);
+      configuredServices.push(newService);
+      services.splice(insertIndex, 0, newService);
       await saveConfiguredState();
 
       isFormActive = false;
@@ -1083,26 +1052,10 @@ async function main() {
       return;
     }
 
-    service.enabled = false;
-
-    if (service.source === "docker") {
-      const containerId = service.containerId?.trim();
-      if (containerId) {
-        const configuredDockerService = configuredServices.find(
-          (configured) => configured.containerId?.trim() === containerId,
-        );
-
-        if (configuredDockerService) {
-          configuredDockerService.enabled = false;
-        } else {
-          configuredServices.push({
-            ...service,
-            enabled: false,
-          });
-        }
-      }
+    const configuredIndex = configuredServices.indexOf(service);
+    if (configuredIndex >= 0) {
+      configuredServices.splice(configuredIndex, 1);
     }
-
     services.splice(index, 1);
     await saveConfiguredState();
 
@@ -1177,7 +1130,6 @@ async function main() {
       const description = service.description
         ? truncate(service.description, 30)
         : truncate(service.url, 30);
-      const groupLabel = truncate(getServiceGroupLabel(service), 24);
       const badge = statusText(rowHealth.state);
       const focused = serviceIndex === selectedIndex;
 
@@ -1188,7 +1140,7 @@ async function main() {
       cardStatusTexts[slotIndex].content = t`${fg(badgeColor)(`[ ${badge} ]`)}`;
 
       const nameColor = focused ? COLORS.focused : COLORS.text;
-      cardBottomTexts[slotIndex].content = t`${bold(fg(nameColor)(name))}\n${fg(COLORS.muted)(`Group: ${groupLabel}`)}\n${fg(COLORS.muted)(description)}`;
+      cardBottomTexts[slotIndex].content = t`${bold(fg(nameColor)(name))}\n${fg(COLORS.muted)(description)}`;
 
       row.borderStyle = focused ? "double" : "single";
       row.borderColor = focused ? COLORS.cardBorderFocused : COLORS.cardBorder;
@@ -1318,8 +1270,7 @@ async function main() {
         url: 1,
         group: 2,
         icon: 3,
-        containerId: 4,
-        save: 5,
+        save: 4,
       };
 
       detailsTitle.content = "";
@@ -1341,9 +1292,8 @@ async function main() {
       detailsError.content = formFieldLine("Icon", iconDisplayValue(), iconFocused, pw);
       detailsError.fg = iconFocused ? COLORS.focused : COLORS.text;
 
-      const containerIdFocused = focusedFieldIndex === FIELDS.containerId;
-      detailsRuntime.content = formFieldLine("Container ID", formFields.containerId, containerIdFocused, pw);
-      detailsRuntime.fg = containerIdFocused ? COLORS.focused : COLORS.text;
+      detailsRuntime.content = "";
+      detailsRuntime.fg = COLORS.text;
 
       detailsCpu.content = "";
       detailsCpu.fg = COLORS.text;
@@ -1361,7 +1311,7 @@ async function main() {
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type/paste name/url/group/icon/container • Enter save • Esc cancel";
+      footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type/paste name/url/group/icon • Enter save • Esc cancel";
     } else if (isSearchMode) {
       detailsPanel.title = "Search";
 
@@ -1442,10 +1392,13 @@ async function main() {
       detailsHealth.content = healthPrefix + healthText;
       detailsHealth.fg = statusColor(selectedHealth.state);
 
-      detailsChecked.content = "";
+      const typePrefix = "Type: ";
+      detailsChecked.content = typePrefix + selected.type;
       detailsChecked.fg = COLORS.text;
 
-      detailsError.content = "";
+      const groupPrefix = "Group: ";
+      const groupValue = isUngroupedService(selected) ? "ungrouped" : getServiceGroupLabel(selected).toLowerCase();
+      detailsError.content = groupPrefix + groupValue;
       detailsError.fg = COLORS.text;
 
       const runtimePrefix = "Runtime: ";
@@ -1454,7 +1407,7 @@ async function main() {
         const runtimeLabel = selectedRuntime.containerName
           ? `Docker (${selectedRuntime.containerName})`
           : "Docker";
-        detailsRuntime.content = runtimePrefix + truncate(runtimeLabel, Math.max(3, contentWidth - runtimePrefix.length));
+        detailsRuntime.content = "\n" + runtimePrefix + truncate(runtimeLabel, Math.max(3, contentWidth - runtimePrefix.length));
         detailsRuntime.fg = COLORS.text;
 
         const cpuPercent = parsePercent(selectedRuntime.cpuUsage);
@@ -1470,9 +1423,6 @@ async function main() {
         detailsDisk.content = `\n${renderMetricBar("Disk", selectedRuntime.diskSize ?? "-", diskPercent, pw)}`;
         detailsDisk.fg = metricColor(diskPercent);
       } else if (selectedRuntime.state === "not-applicable") {
-        detailsChecked.content = "";
-        detailsChecked.fg = COLORS.text;
-
         detailsRuntime.content = "";
         detailsRuntime.fg = COLORS.text;
 
@@ -1490,7 +1440,7 @@ async function main() {
               ? "Docker unavailable"
               : "Docker runtime unavailable";
 
-        detailsRuntime.content = runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
+        detailsRuntime.content = "\n" + runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
         detailsRuntime.fg = COLORS.offline;
 
         detailsCpu.content = "\nCPU: -";
@@ -1595,7 +1545,7 @@ async function main() {
 
   const detectAndPersistServiceContainer = async (index: number): Promise<void> => {
     const service = services[index];
-    if (!service || service.source === "docker") {
+    if (!service || service.type !== "manual") {
       return;
     }
 
@@ -1615,14 +1565,15 @@ async function main() {
     const nextContainerName = resolvedName || undefined;
 
     const hasChanges =
-      service.containerId !== nextContainerId || service.containerName !== nextContainerName;
+      (service as ManualService & { containerId?: string; containerName?: string }).containerId !== nextContainerId ||
+      (service as ManualService & { containerId?: string; containerName?: string }).containerName !== nextContainerName;
 
     if (!hasChanges) {
       return;
     }
 
-    service.containerId = nextContainerId;
-    service.containerName = nextContainerName;
+    (service as ManualService & { containerId?: string; containerName?: string }).containerId = nextContainerId;
+    (service as ManualService & { containerId?: string; containerName?: string }).containerName = nextContainerName;
     await saveConfiguredState();
   };
 
@@ -1731,7 +1682,7 @@ async function main() {
     process.exit(1);
   };
 
-  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2 || index === 3 || index === 4;
+  const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2 || index === 3;
 
   const appendTextToFocusedField = (rawText: string): void => {
     const normalized = rawText.replace(/[\r\n]+/g, "");
@@ -1761,19 +1712,15 @@ async function main() {
       syncIconOptionIndex();
       return;
     }
-
-    if (focusedFieldIndex === 4) {
-      formFields.containerId += normalized;
-    }
   };
 
   const nextField = (): void => {
-    const max = 5;
+    const max = 4;
     focusedFieldIndex = (focusedFieldIndex + 1) % (max + 1);
   };
 
   const prevField = (): void => {
-    const max = 5;
+    const max = 4;
     focusedFieldIndex = (focusedFieldIndex - 1 + max + 1) % (max + 1);
   };
 
@@ -1958,7 +1905,7 @@ async function main() {
       }
 
       if (event.name === "return" || event.name === "enter") {
-        if (focusedFieldIndex === 5) {
+        if (focusedFieldIndex === 4) {
           void submitForm();
           event.preventDefault();
           return;
@@ -1977,8 +1924,6 @@ async function main() {
           } else if (focusedFieldIndex === 3) {
             formFields.icon = formFields.icon.slice(0, -1);
             syncIconOptionIndex();
-          } else if (focusedFieldIndex === 4) {
-            formFields.containerId = formFields.containerId.slice(0, -1);
           }
           safeRender();
         }

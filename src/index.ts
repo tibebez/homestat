@@ -5,7 +5,7 @@ export {
   getServiceDockerStats,
   isLocalServiceUrl,
   mapDiscoveredContainersToServices,
-  mergeStaticAndDockerServices,
+  mergeManualAndDockerServices,
   parseDockerStatsJsonLine,
   parseDockerStatsOutput,
   resolveServiceContainer,
@@ -14,7 +14,6 @@ export type {
   DockerContainerRef,
   DockerContainerStats,
   DockerDiscoveredContainer,
-  DockerDiscoveryService,
   DockerError,
   DockerErrorCode,
   DockerResult,
@@ -37,4 +36,4 @@ export {
   isUngroupedService,
 } from "./services.ts";
 export type { ServiceListView } from "./services.ts";
-export type { Config, GlobalSettings, HealthState, Service, ServiceHealth } from "./types.ts";
+export type { Config, GlobalSettings, HealthState, Service, ServiceHealth, ServiceType, ManualService, DockerService, WidgetService } from "./types.ts";

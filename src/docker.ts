@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { Service } from "./types.ts";
+import type { DockerService, ManualService, Service } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,12 +60,6 @@ export interface DockerDiscoveredContainer {
   name: string;
   labels: Record<string, string>;
   ports: string;
-}
-
-export interface DockerDiscoveryService extends Service {
-  source: "docker";
-  containerId: string;
-  containerName: string;
 }
 
 interface ParsedServiceUrl {
@@ -529,8 +523,8 @@ function parseDockerPsJsonOutput(output: string): DockerResult<DockerDiscoveredC
 export function mapDiscoveredContainersToServices(
   containers: readonly DockerDiscoveredContainer[],
   defaultIcon = "docker",
-): DockerDiscoveryService[] {
-  const services: DockerDiscoveryService[] = [];
+): DockerService[] {
+  const services: DockerService[] = [];
 
   for (const container of containers) {
     const name = container.labels["homestat.name"]?.trim() || container.name;
@@ -540,7 +534,7 @@ export function mapDiscoveredContainersToServices(
     const fallbackUrl = publishedPort ? `http://localhost:${publishedPort}` : "http://localhost";
 
     services.push({
-      source: "docker",
+      type: "docker",
       containerId: container.id,
       containerName: container.name,
       name: name || container.id,
@@ -552,22 +546,16 @@ export function mapDiscoveredContainersToServices(
   return services;
 }
 
-export function mergeStaticAndDockerServices(
-  staticServices: readonly Service[],
-  dockerServices: readonly DockerDiscoveryService[],
+export function mergeManualAndDockerServices(
+  manualServices: readonly ManualService[],
+  dockerServices: readonly DockerService[],
 ): Service[] {
-  const existingStaticContainerIds = new Set(
-    staticServices
-      .map((service) => service.containerId?.trim())
-      .filter((value): value is string => Boolean(value)),
-  );
-
   const seenDockerContainerIds = new Set<string>();
-  const dedupedDocker: DockerDiscoveryService[] = [];
+  const dedupedDocker: DockerService[] = [];
 
   for (const service of dockerServices) {
     const id = service.containerId.trim();
-    if (!id || existingStaticContainerIds.has(id) || seenDockerContainerIds.has(id)) {
+    if (!id || seenDockerContainerIds.has(id)) {
       continue;
     }
 
@@ -575,12 +563,12 @@ export function mergeStaticAndDockerServices(
     dedupedDocker.push(service);
   }
 
-  return [...staticServices, ...dedupedDocker];
+  return [...manualServices, ...dedupedDocker];
 }
 
 export async function discoverHomestatDockerServices(
   defaultIcon = "docker",
-): Promise<DockerResult<DockerDiscoveryService[]>> {
+): Promise<DockerResult<DockerService[]>> {
   const result = await runDocker([
     "ps",
     "--filter",
@@ -616,12 +604,12 @@ export function isLocalServiceUrl(url: string): boolean {
 }
 
 export async function resolveServiceContainer(
-  service: Pick<Service, "url" | "containerId" | "containerName">,
+  service: Pick<Service, "url" | "type"> & Partial<Pick<DockerService, "containerId" | "containerName">>,
 ): Promise<DockerResult<DockerContainerRef>> {
   const configuredId = service.containerId?.trim();
   const configuredName = service.containerName?.trim();
 
-  if (configuredId || configuredName) {
+  if (service.type === "docker" && (configuredId || configuredName)) {
     return success({
       id: configuredId ?? null,
       name: configuredName ?? configuredId ?? "",
@@ -813,7 +801,7 @@ export async function fetchDockerContainerStats(
 }
 
 export async function getServiceDockerStats(
-  service: Pick<Service, "url" | "containerId" | "containerName">,
+  service: Pick<Service, "url" | "type"> & Partial<Pick<DockerService, "containerId" | "containerName">>,
 ): Promise<DockerResult<{ container: DockerContainerRef; stats: DockerContainerStats }>> {
   const containerResult = await resolveServiceContainer(service);
   if (!containerResult.ok) {

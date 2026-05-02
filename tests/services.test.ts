@@ -11,12 +11,12 @@ import {
 } from "../src/index.ts";
 
 const sampleServices: Service[] = [
-  { name: "A", url: "http://localhost:3000", group: "Media" },
-  { name: "B", url: "http://localhost:3001", group: null },
-  { name: "C", url: "http://localhost:3002", group: "Monitoring" },
-  { name: "D", url: "http://localhost:3003", group: "Media" },
-  { name: "E", url: "http://localhost:3004" },
-  { name: "F", url: "http://localhost:3005", group: "" },
+  { type: "manual", name: "A", url: "http://localhost:3000", group: "Media" },
+  { type: "manual", name: "B", url: "http://localhost:3001", group: null },
+  { type: "manual", name: "C", url: "http://localhost:3002", group: "Monitoring" },
+  { type: "manual", name: "D", url: "http://localhost:3003", group: "Media" },
+  { type: "manual", name: "E", url: "http://localhost:3004" },
+  { type: "manual", name: "F", url: "http://localhost:3005", group: "" },
 ];
 
 test("returns all services without filtering", () => {
@@ -38,9 +38,9 @@ test("returns services in selected group only", () => {
 
 test("normalizes whitespace when collecting distinct group names", () => {
   const services: Service[] = [
-    { name: "A", url: "http://localhost:1", group: "Media" },
-    { name: "B", url: "http://localhost:2", group: " Media " },
-    { name: "C", url: "http://localhost:3", group: "Monitoring" },
+    { type: "manual", name: "A", url: "http://localhost:1", group: "Media" },
+    { type: "manual", name: "B", url: "http://localhost:2", group: " Media " },
+    { type: "manual", name: "C", url: "http://localhost:3", group: "Monitoring" },
   ];
 
   expect(getDistinctGroupNames(services)).toEqual(["Media", "Monitoring"]);
@@ -48,9 +48,9 @@ test("normalizes whitespace when collecting distinct group names", () => {
 
 test("normalizes whitespace when filtering services by group", () => {
   const services: Service[] = [
-    { name: "A", url: "http://localhost:1", group: "Media" },
-    { name: "B", url: "http://localhost:2", group: " Media " },
-    { name: "C", url: "http://localhost:3", group: "Monitoring" },
+    { type: "manual", name: "A", url: "http://localhost:1", group: "Media" },
+    { type: "manual", name: "B", url: "http://localhost:2", group: " Media " },
+    { type: "manual", name: "C", url: "http://localhost:3", group: "Monitoring" },
   ];
 
   const media = getServicesByGroup(services, "Media ");
@@ -73,9 +73,9 @@ test("returns placeholder for ungrouped services", () => {
 
 test("getServicesForView returns All Services in original order", () => {
   const services: Service[] = [
-    { name: "A", url: "http://localhost:1" },
-    { name: "B", url: "http://localhost:2" },
-    { name: "C", url: "http://localhost:3" },
+    { type: "manual", name: "A", url: "http://localhost:1" },
+    { type: "manual", name: "B", url: "http://localhost:2" },
+    { type: "manual", name: "C", url: "http://localhost:3" },
   ];
 
   const view: ServiceListView = { kind: "all" };
@@ -85,10 +85,10 @@ test("getServicesForView returns All Services in original order", () => {
 
 test("getServicesForView filters Group view while preserving original order", () => {
   const services: Service[] = [
-    { name: "A", url: "http://localhost:1", group: "Media" },
-    { name: "B", url: "http://localhost:2", group: "Media" },
-    { name: "C", url: "http://localhost:3", group: "Other" },
-    { name: "D", url: "http://localhost:4", group: "Media" },
+    { type: "manual", name: "A", url: "http://localhost:1", group: "Media" },
+    { type: "manual", name: "B", url: "http://localhost:2", group: "Media" },
+    { type: "manual", name: "C", url: "http://localhost:3", group: "Other" },
+    { type: "manual", name: "D", url: "http://localhost:4", group: "Media" },
   ];
 
   const view: ServiceListView = { kind: "group", groupName: "Media" };
