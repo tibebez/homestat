@@ -528,7 +528,7 @@ function parseDockerPsJsonOutput(output: string): DockerResult<DockerDiscoveredC
 
 export function mapDiscoveredContainersToServices(
   containers: readonly DockerDiscoveredContainer[],
-  defaultIcon = "🐳",
+  defaultIcon = "docker",
 ): DockerDiscoveryService[] {
   const services: DockerDiscoveryService[] = [];
 
@@ -579,7 +579,7 @@ export function mergeStaticAndDockerServices(
 }
 
 export async function discoverHomestatDockerServices(
-  defaultIcon = "🐳",
+  defaultIcon = "docker",
 ): Promise<DockerResult<DockerDiscoveryService[]>> {
   const result = await runDocker([
     "ps",

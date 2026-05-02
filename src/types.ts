@@ -10,8 +10,7 @@ export interface Service {
   source?: "docker" | "static";
   enabled?: boolean;
   group?: string | null;
-  bookmarked?: boolean;
-  bookmarkedAt?: number | null;
+
 }
 
 export interface GlobalSettings {

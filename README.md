@@ -29,19 +29,19 @@ Create `~/.homestat/config.json`:
     {
       "name": "Jellyfin",
       "url": "http://localhost:8096",
-      "icon": "🎬",
+      "icon": "jellyfin",
       "enabled": true
     },
     {
       "name": "Jellyseerr",
       "url": "localhost:5055",
-      "icon": "📽️",
+      "icon": "jellyseerr",
       "containerName": "jellyseerr"
     },
     {
       "name": "Grafana",
       "url": "http://localhost:3000",
-      "icon": "📊",
+      "icon": "grafana",
       "containerId": "a1b2c3d4e5f6"
     }
   ]
@@ -54,8 +54,7 @@ Create `~/.homestat/config.json`:
 - `n`: add a new service (opens form in details panel)
 - `s`: open global settings form (auto-refresh, interval, docker auto-discovery, startup refresh)
 - `t`: toggle list view (All Services → each group → back to All Services)
-- `o`: open selected service in browser
-- `b`: toggle bookmark on selected service (shows a subtle `★` badge)
+- `Enter`: open selected service in browser
 - `e`: edit selected service
 - `d`: disable selected service (`enabled: false` in config)
 - `r`: refresh service health + runtime stats
@@ -82,7 +81,7 @@ For each matching container, homestat creates a temporary service (`source: "doc
 - `homestat.name`, `homestat.url`, `homestat.icon` labels when present
 - fallback name: container name
 - fallback URL: `http://localhost:<published-port>`
-- fallback icon: `🐳`
+- fallback icon: `docker`
 
 Discovered services are merged with static `~/.homestat/config.json` services and deduped by container ID.
 

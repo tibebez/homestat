@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { Config, GlobalSettings } from "./types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".homestat", "config.json");
+export const HOMESTAT_DIR = dirname(CONFIG_PATH);
 
 export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
   autoRefreshEnabled: true,
@@ -62,15 +63,6 @@ function assertConfig(data: unknown): asserts data is { services: unknown[]; set
       throw new Error(`Service '${name}' has an invalid group; expected a string, null, or undefined.`);
     }
 
-    const bookmarked = (service as { bookmarked?: unknown }).bookmarked;
-    if (bookmarked !== undefined && typeof bookmarked !== "boolean") {
-      throw new Error(`Service '${name}' has an invalid bookmarked flag; expected a boolean.`);
-    }
-
-    const bookmarkedAt = (service as { bookmarkedAt?: unknown }).bookmarkedAt;
-    if (bookmarkedAt !== undefined && bookmarkedAt !== null && typeof bookmarkedAt !== "number") {
-      throw new Error(`Service '${name}' has an invalid bookmarkedAt value; expected a number, null, or undefined.`);
-    }
   }
 
   const settings = (data as { settings?: unknown }).settings;

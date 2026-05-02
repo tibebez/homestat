@@ -6,7 +6,6 @@ import {
   getServicesByGroup,
   getServicesForView,
   getUngroupedServices,
-  sortServicesBookmarkedFirst,
   type Service,
   type ServiceListView,
 } from "../src/index.ts";
@@ -72,59 +71,27 @@ test("returns placeholder for ungrouped services", () => {
   expect(getServiceGroupLabel(sampleServices[4], "No Group")).toBe("No Group");
 });
 
-test("sorts bookmarked services first by bookmarked timestamp descending", () => {
+test("getServicesForView returns All Services in original order", () => {
   const services: Service[] = [
-    { name: "first", url: "http://localhost:1", bookmarked: false },
-    { name: "older bookmark", url: "http://localhost:2", bookmarked: true, bookmarkedAt: 100 },
-    { name: "newer bookmark", url: "http://localhost:3", bookmarked: true, bookmarkedAt: 500 },
-    { name: "legacy bookmark", url: "http://localhost:4", bookmarked: true },
-    { name: "second", url: "http://localhost:5", bookmarked: false },
-  ];
-
-  const sorted = sortServicesBookmarkedFirst(services);
-
-  expect(sorted.map((service) => service.name)).toEqual([
-    "newer bookmark",
-    "older bookmark",
-    "legacy bookmark",
-    "first",
-    "second",
-  ]);
-});
-
-test("group view ordering can be composed with bookmark-first sorting", () => {
-  const services: Service[] = [
-    { name: "A", url: "http://localhost:1", group: "Media", bookmarked: false },
-    { name: "B", url: "http://localhost:2", group: "Media", bookmarked: true, bookmarkedAt: 10 },
-    { name: "C", url: "http://localhost:3", group: "Other", bookmarked: true, bookmarkedAt: 999 },
-    { name: "D", url: "http://localhost:4", group: "Media", bookmarked: true, bookmarkedAt: 20 },
-  ];
-
-  const mediaOrdered = sortServicesBookmarkedFirst(getServicesByGroup(services, "Media"));
-  expect(mediaOrdered.map((service) => service.name)).toEqual(["D", "B", "A"]);
-});
-
-test("getServicesForView sorts All Services bookmark-first", () => {
-  const services: Service[] = [
-    { name: "A", url: "http://localhost:1", bookmarked: false },
-    { name: "B", url: "http://localhost:2", bookmarked: true, bookmarkedAt: 10 },
-    { name: "C", url: "http://localhost:3", bookmarked: true, bookmarkedAt: 20 },
+    { name: "A", url: "http://localhost:1" },
+    { name: "B", url: "http://localhost:2" },
+    { name: "C", url: "http://localhost:3" },
   ];
 
   const view: ServiceListView = { kind: "all" };
   const ordered = getServicesForView(services, view);
-  expect(ordered.map((service) => service.name)).toEqual(["C", "B", "A"]);
+  expect(ordered.map((service) => service.name)).toEqual(["A", "B", "C"]);
 });
 
-test("getServicesForView sorts Group view bookmark-first within selected group", () => {
+test("getServicesForView filters Group view while preserving original order", () => {
   const services: Service[] = [
-    { name: "A", url: "http://localhost:1", group: "Media", bookmarked: false },
-    { name: "B", url: "http://localhost:2", group: "Media", bookmarked: true, bookmarkedAt: 10 },
-    { name: "C", url: "http://localhost:3", group: "Other", bookmarked: true, bookmarkedAt: 999 },
-    { name: "D", url: "http://localhost:4", group: "Media", bookmarked: true, bookmarkedAt: 20 },
+    { name: "A", url: "http://localhost:1", group: "Media" },
+    { name: "B", url: "http://localhost:2", group: "Media" },
+    { name: "C", url: "http://localhost:3", group: "Other" },
+    { name: "D", url: "http://localhost:4", group: "Media" },
   ];
 
   const view: ServiceListView = { kind: "group", groupName: "Media" };
   const ordered = getServicesForView(services, view);
-  expect(ordered.map((service) => service.name)).toEqual(["D", "B", "A"]);
+  expect(ordered.map((service) => service.name)).toEqual(["A", "B", "D"]);
 });

@@ -112,7 +112,7 @@ test("maps discovered docker containers using label overrides and localhost port
       name: "jellyfin",
       labels: {
         "homestat.name": "Jellyfin",
-        "homestat.icon": "🎬",
+        "homestat.icon": "jellyfin",
       },
       ports: "0.0.0.0:8096->8096/tcp",
     },
@@ -132,7 +132,7 @@ test("maps discovered docker containers using label overrides and localhost port
     containerName: "jellyfin",
     name: "Jellyfin",
     url: "http://localhost:8096",
-    icon: "🎬",
+    icon: "jellyfin",
   });
 
   expect(services[1]).toMatchObject({
@@ -141,7 +141,7 @@ test("maps discovered docker containers using label overrides and localhost port
     containerName: "grafana",
     name: "grafana",
     url: "https://grafana.local",
-    icon: "🐳",
+    icon: "docker",
   });
 });
 
@@ -156,7 +156,7 @@ test("merges static and discovered services, deduping by container id", () => {
         source: "docker",
         name: "Jellyfin",
         url: "http://localhost:8096",
-        icon: "🐳",
+        icon: "docker",
         containerId: "abc123",
         containerName: "jellyfin",
       },
@@ -164,7 +164,7 @@ test("merges static and discovered services, deduping by container id", () => {
         source: "docker",
         name: "Grafana",
         url: "http://localhost:3000",
-        icon: "🐳",
+        icon: "docker",
         containerId: "def456",
         containerName: "grafana",
       },

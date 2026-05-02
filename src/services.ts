@@ -69,47 +69,13 @@ export function getServicesByGroup(services: readonly Service[], groupName: stri
   });
 }
 
-function hasBookmark(service: Service): boolean {
-  return service.bookmarked === true;
-}
-
-function bookmarkTimestamp(service: Service): number {
-  if (typeof service.bookmarkedAt === "number" && Number.isFinite(service.bookmarkedAt)) {
-    return service.bookmarkedAt;
-  }
-
-  return Number.NEGATIVE_INFINITY;
-}
-
-export function sortServicesBookmarkedFirst(services: readonly Service[]): Service[] {
-  return [...services].sort((left, right) => {
-    const leftBookmarked = hasBookmark(left);
-    const rightBookmarked = hasBookmark(right);
-
-    if (leftBookmarked && !rightBookmarked) {
-      return -1;
-    }
-
-    if (!leftBookmarked && rightBookmarked) {
-      return 1;
-    }
-
-    if (leftBookmarked && rightBookmarked) {
-      return bookmarkTimestamp(right) - bookmarkTimestamp(left);
-    }
-
-    return 0;
-  });
-}
-
 export function getServicesForView(
   services: readonly Service[],
   view: ServiceListView,
 ): Service[] {
   if (view.kind === "group") {
-    return sortServicesBookmarkedFirst(getServicesByGroup(services, view.groupName));
+    return getServicesByGroup(services, view.groupName);
   }
 
-  // In All Services view we also surface bookmarked entries first.
-  return sortServicesBookmarkedFirst(services);
+  return getAllServices(services);
 }

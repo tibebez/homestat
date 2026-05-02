@@ -46,8 +46,7 @@ const COLORS = {
   cardBorderFocused: "#a78bfa",
   iconBg: "#14532d",
   iconFg: "#4ade80",
-  bookmarkBg: "#dcfce7",
-  bookmarkFg: "#16a34a",
+
 } as const;
 
 const ICON_PRESETS = ["•", "🐳", "⚡", "🚀", "🗄️", "🌐", "🔒", "📊", "💾", "🔧", "📡", "🖥️"];
@@ -1068,62 +1067,6 @@ async function main() {
     safeRender();
   }
 
-  async function toggleBookmark(index: number) {
-    if (index < 0 || index >= services.length) return;
-
-    const service = services[index];
-    if (!service) {
-      return;
-    }
-
-    let configuredTarget: Service | null = null;
-
-    if (service.source === "docker") {
-      configuredTarget = getConfiguredByContainerId(service);
-      if (!configuredTarget) {
-        configuredTarget = {
-          ...service,
-          enabled: service.enabled ?? true,
-        };
-        configuredServices.push(configuredTarget);
-      }
-    }
-
-    const previousBookmarked = service.bookmarked;
-    const previousBookmarkedAt = service.bookmarkedAt;
-    const previousConfiguredBookmarked = configuredTarget?.bookmarked;
-    const previousConfiguredBookmarkedAt = configuredTarget?.bookmarkedAt;
-
-    const nextBookmarked = !service.bookmarked;
-    service.bookmarked = nextBookmarked;
-    service.bookmarkedAt = nextBookmarked ? Date.now() : null;
-
-    if (configuredTarget) {
-      configuredTarget.bookmarked = service.bookmarked;
-      configuredTarget.bookmarkedAt = service.bookmarkedAt;
-    }
-
-    // Optimistic UI update so grouped bookmark ordering reflows immediately.
-    safeRender();
-
-    try {
-      await saveConfiguredState();
-    } catch (error) {
-      // Restore in-memory state before escalating this persistence failure.
-      service.bookmarked = previousBookmarked;
-      service.bookmarkedAt = previousBookmarkedAt;
-
-      if (configuredTarget) {
-        configuredTarget.bookmarked = previousConfiguredBookmarked;
-        configuredTarget.bookmarkedAt = previousConfiguredBookmarkedAt;
-      }
-
-      safeRender();
-
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to persist bookmark change: ${message}`);
-    }
-  }
 
   const statusText = (state: ServiceHealth["state"]): string => {
     if (state === "online") {
@@ -1186,10 +1129,7 @@ async function main() {
       cardIconTexts[slotIndex].content = t`${iconChunk}`;
 
       const badgeColor = statusColor(rowHealth.state);
-      const bookmarkBadge = fg(COLORS.bookmarkFg)("⭐");
-      cardStatusTexts[slotIndex].content = service.bookmarked
-        ? t`${bookmarkBadge} ${fg(badgeColor)(`[ ${badge} ]`)}`
-        : t`${fg(badgeColor)(`[ ${badge} ]`)}`;
+      cardStatusTexts[slotIndex].content = t`${fg(badgeColor)(`[ ${badge} ]`)}`;
 
       const nameColor = focused ? COLORS.focused : COLORS.text;
       cardBottomTexts[slotIndex].content = t`${bold(fg(nameColor)(name))}\n${fg(COLORS.muted)(`Group: ${groupLabel}`)}\n${fg(COLORS.muted)(description)}`;
@@ -1387,8 +1327,7 @@ async function main() {
 
       detailsPanel.title = truncate(capitalizeFirstLetter(selected.name), Math.max(3, pw - 4));
 
-      const bookmarkPrefix = selected.bookmarked ? "★ " : "";
-      const titlePrefix = `${selected.icon ?? "•"} ${bookmarkPrefix}`;
+      const titlePrefix = `${selected.icon ?? "•"} `;
       detailsTitle.content =
         titlePrefix + truncate(capitalizeFirstLetter(selected.name), Math.max(3, contentWidth - titlePrefix.length));
       detailsTitle.fg = COLORS.focused;
@@ -1472,7 +1411,7 @@ async function main() {
       }
 
 
-      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit`;
+      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • Enter open • e edit • d delete • r refresh • Ctrl+C quit`;
     }
   };
 
@@ -1976,7 +1915,7 @@ async function main() {
       return;
     }
 
-    if ((event.sequence === "o" || event.name === "o") && !event.ctrl && !event.meta) {
+    if (event.name === "return" || event.name === "enter") {
       const active = getActiveServiceIndexes();
       if (active.length > 0) {
         ensureSelectionWithinActive(active);
@@ -2009,15 +1948,6 @@ async function main() {
       return;
     }
 
-    if ((event.sequence === "b" || event.name === "b") && !event.ctrl && !event.meta) {
-      const active = getActiveServiceIndexes();
-      if (active.length > 0) {
-        ensureSelectionWithinActive(active);
-        void toggleBookmark(selectedIndex).catch((error) => failFast(error, "bookmark persistence failure"));
-      }
-      event.preventDefault();
-      return;
-    }
 
     if ((event.sequence === "r" || event.name === "r") && !event.ctrl && !event.meta) {
       void refreshHealth(true).catch((error) => failFast(error, "manual refresh failure"));

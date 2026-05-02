@@ -35,7 +35,6 @@ export {
   getServicesForView,
   getUngroupedServices,
   isUngroupedService,
-  sortServicesBookmarkedFirst,
 } from "./services.ts";
 export type { ServiceListView } from "./services.ts";
 export type { Config, GlobalSettings, HealthState, Service, ServiceHealth } from "./types.ts";

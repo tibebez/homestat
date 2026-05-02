@@ -32,31 +32,6 @@ test("accepts services with null or missing group", async () => {
   );
 });
 
-test("accepts bookmarkedAt as number or null", async () => {
-  await withTempConfigFile(
-    {
-      services: [
-        {
-          name: "A",
-          url: "http://localhost:3000",
-          bookmarked: true,
-          bookmarkedAt: 42,
-        },
-        {
-          name: "B",
-          url: "http://localhost:3001",
-          bookmarked: false,
-          bookmarkedAt: null,
-        },
-      ],
-    },
-    async (path) => {
-      const config = await loadConfig(path);
-      expect(config.services[0].bookmarkedAt).toBe(42);
-      expect(config.services[1].bookmarkedAt).toBeNull();
-    },
-  );
-});
 
 test("accepts enabled as boolean", async () => {
   await withTempConfigFile(
