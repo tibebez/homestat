@@ -22,6 +22,8 @@ export interface DockerService extends BaseService {
 
 export interface WidgetService extends BaseService {
   type: "widget";
+  widgetType: string;
+  widgetConfig: Record<string, string>;
 }
 
 export type Service = ManualService | DockerService | WidgetService;

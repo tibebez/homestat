@@ -71,7 +71,13 @@ function migrateService(data: unknown): Service {
   }
 
   if (type === "widget") {
-    return { ...base, type: "widget" };
+    const widgetType = typeof record.widgetType === "string" ? record.widgetType.trim() : "";
+    const widgetConfig = record.widgetConfig && typeof record.widgetConfig === "object" && !Array.isArray(record.widgetConfig)
+      ? Object.fromEntries(
+          Object.entries(record.widgetConfig as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]),
+        )
+      : {};
+    return { ...base, type: "widget", widgetType, widgetConfig };
   }
 
   return { ...base, type: "manual" };
@@ -115,6 +121,16 @@ function assertConfig(data: unknown): asserts data is { services: unknown[]; set
     const containerName = (service as { containerName?: unknown }).containerName;
     if (containerName !== undefined && typeof containerName !== "string") {
       throw new Error(`Service '${name}' has an invalid containerName; expected a string.`);
+    }
+
+    const widgetType = (service as { widgetType?: unknown }).widgetType;
+    if (widgetType !== undefined && typeof widgetType !== "string") {
+      throw new Error(`Service '${name}' has an invalid widgetType; expected a string.`);
+    }
+
+    const widgetConfig = (service as { widgetConfig?: unknown }).widgetConfig;
+    if (widgetConfig !== undefined && (typeof widgetConfig !== "object" || widgetConfig === null || Array.isArray(widgetConfig))) {
+      throw new Error(`Service '${name}' has an invalid widgetConfig; expected an object.`);
     }
 
     const group = (service as { group?: unknown }).group;

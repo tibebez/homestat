@@ -37,3 +37,8 @@ export {
 } from "./services.ts";
 export type { ServiceListView } from "./services.ts";
 export type { Config, GlobalSettings, HealthState, Service, ServiceHealth, ServiceType, ManualService, DockerService, WidgetService } from "./types.ts";
+export {
+  WIDGET_REGISTRY,
+  getWidgetById,
+} from "./widgets/index.ts";
+export type { WidgetDefinition, WidgetField } from "./widgets/index.ts";

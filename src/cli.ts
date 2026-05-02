@@ -30,7 +30,9 @@ import {
   isUngroupedService,
   type ServiceListView,
 } from "./services.ts";
-import type { ManualService, Service, ServiceHealth } from "./types.ts";
+import type { ManualService, Service, ServiceHealth, WidgetService } from "./types.ts";
+import { WIDGET_REGISTRY, getWidgetById } from "./widgets/index.ts";
+import type { WidgetDefinition, WidgetField } from "./widgets/index.ts";
 
 const COLORS = {
   online: "#22c55e",
@@ -312,15 +314,14 @@ async function main() {
   const config = await loadConfig();
   const configuredServices = config.services;
   const globalSettings = { ...config.settings };
-  const services: Service[] = configuredServices.filter((service) => service.type !== "widget");
+  const services: Service[] = [...configuredServices];
 
   async function saveConfiguredState(): Promise<void> {
     await saveConfig({ services: configuredServices, settings: globalSettings });
   }
 
   function rebuildActiveServices(): void {
-    const active = configuredServices.filter((service) => service.type !== "widget");
-    services.splice(0, services.length, ...active);
+    services.splice(0, services.length, ...configuredServices);
   }
 
   async function refreshDockerDiscoveredServices(): Promise<void> {
@@ -581,6 +582,12 @@ async function main() {
     fg: COLORS.text,
   });
 
+  const detailsWidgetContent = new TextRenderable(renderer, {
+    id: "details-widget-content",
+    content: "",
+    fg: COLORS.text,
+  });
+
   renderer.root.add(root);
   root.add(mainArea);
   root.add(footer);
@@ -606,6 +613,7 @@ async function main() {
   detailsPanel.add(detailsCpu);
   detailsPanel.add(detailsRam);
   detailsPanel.add(detailsDisk);
+  detailsPanel.add(detailsWidgetContent);
 
   const health: ServiceHealth[] = [];
   const runtimeStats: ServiceRuntimeStats[] = [];
@@ -779,6 +787,27 @@ async function main() {
 
   let isSearchMode = false;
   let searchQuery = "";
+
+  let isWidgetPickerActive = false;
+  let widgetPickerIndex = 0;
+
+  let isWidgetFormActive = false;
+  let widgetFormType = "";
+  let widgetFormMode: "add" | "edit" = "add";
+  let widgetEditingIndex = -1;
+  let widgetFormFields: Record<string, string> = {};
+  let widgetFormFocusedIndex = 0;
+  let widgetFormError = "";
+  let isWidgetSubmitting = false;
+
+  interface WidgetDataState {
+    state: "ok" | "error" | "loading";
+    data?: unknown;
+    error?: string;
+    lastFetchedAt: number | null;
+  }
+
+  const widgetData: Map<number, WidgetDataState> = new Map();
 
   function resetSettingsForm(): void {
     settingsFormFields.autoRefreshEnabled = globalSettings.autoRefreshEnabled;
@@ -1057,6 +1086,7 @@ async function main() {
       configuredServices.splice(configuredIndex, 1);
     }
     services.splice(index, 1);
+    widgetData.clear();
     await saveConfiguredState();
 
     syncStateWithServices();
@@ -1072,6 +1102,192 @@ async function main() {
     safeRender();
   }
 
+
+  function getWidgetFormFieldList(widgetDef: WidgetDefinition): Array<{ kind: "service"; label: string; name: string; type: string } | { kind: "widget"; field: WidgetField }> {
+    return [
+      { kind: "service" as const, label: "Name", name: "name", type: "text" },
+      { kind: "service" as const, label: "URL", name: "url", type: "text" },
+      { kind: "service" as const, label: "Group", name: "group", type: "text" },
+      { kind: "service" as const, label: "Icon", name: "icon", type: "text" },
+      ...widgetDef.fields.map((field) => ({ kind: "widget" as const, field })),
+    ];
+  }
+
+  function resetWidgetForm(type: string): void {
+    const def = getWidgetById(type);
+    widgetFormType = type;
+    widgetFormFields = {
+      name: "",
+      url: "",
+      group: "",
+      icon: def?.icon ?? "•",
+    };
+    if (def) {
+      for (const field of def.fields) {
+        widgetFormFields[field.name] = "";
+      }
+    }
+    widgetFormFocusedIndex = 0;
+    widgetFormError = "";
+    widgetFormMode = "add";
+    widgetEditingIndex = -1;
+  }
+
+  function startWidgetEditForm(index: number): void {
+    const service = services[index];
+    if (service.type !== "widget") return;
+    const ws = service as WidgetService;
+    const def = getWidgetById(ws.widgetType);
+    widgetFormType = ws.widgetType;
+    widgetFormFields = {
+      name: ws.name,
+      url: ws.url,
+      group: (ws.group ?? "").trim(),
+      icon: ws.icon ?? def?.icon ?? "•",
+    };
+    if (def) {
+      for (const field of def.fields) {
+        widgetFormFields[field.name] = ws.widgetConfig[field.name] ?? "";
+      }
+    }
+    widgetFormFocusedIndex = 0;
+    widgetFormError = "";
+    widgetFormMode = "edit";
+    widgetEditingIndex = index;
+  }
+
+  async function submitWidgetForm(): Promise<void> {
+    if (isWidgetSubmitting) return;
+    isWidgetSubmitting = true;
+
+    try {
+      const def = getWidgetById(widgetFormType);
+      if (!def) {
+        widgetFormError = "Error: Unknown widget type.";
+        safeRender();
+        return;
+      }
+
+      const name = widgetFormFields.name.trim();
+      const url = widgetFormFields.url.trim();
+
+      if (!name) {
+        widgetFormError = "Error: Name is required.";
+        safeRender();
+        return;
+      }
+      if (!url) {
+        widgetFormError = "Error: URL is required.";
+        safeRender();
+        return;
+      }
+
+      for (const field of def.fields) {
+        if (field.required && !widgetFormFields[field.name]?.trim()) {
+          widgetFormError = `Error: ${field.label} is required.`;
+          safeRender();
+          return;
+        }
+      }
+
+      const widgetConfig: Record<string, string> = {};
+      for (const field of def.fields) {
+        widgetConfig[field.name] = widgetFormFields[field.name] ?? "";
+      }
+
+      const normalizedGroup = widgetFormFields.group.trim();
+
+      if (widgetFormMode === "edit" && widgetEditingIndex >= 0) {
+        const existing = services[widgetEditingIndex];
+        if (!existing || existing.type !== "widget") {
+          widgetFormError = "Error: Widget no longer exists.";
+          safeRender();
+          return;
+        }
+        Object.assign(existing, {
+          name: capitalizeFirstLetter(name),
+          url,
+          group: normalizedGroup || undefined,
+          icon: widgetFormFields.icon.trim() || def.icon,
+          widgetType: widgetFormType,
+          widgetConfig,
+        });
+        await saveConfiguredState();
+        isWidgetFormActive = false;
+        widgetFormError = "";
+        selectedIndex = widgetEditingIndex;
+        syncStateWithServices();
+        safeRender();
+        void refreshWidgetData(widgetEditingIndex);
+        return;
+      }
+
+      const newWidget: WidgetService = {
+        type: "widget",
+        name: capitalizeFirstLetter(name),
+        url,
+        group: normalizedGroup || undefined,
+        icon: widgetFormFields.icon.trim() || def.icon,
+        widgetType: widgetFormType,
+        widgetConfig,
+      };
+
+      configuredServices.push(newWidget);
+      services.push(newWidget);
+      await saveConfiguredState();
+
+      const newIndex = services.length - 1;
+      isWidgetFormActive = false;
+      widgetFormError = "";
+      selectedIndex = newIndex;
+      syncStateWithServices();
+      safeRender();
+      void refreshWidgetData(newIndex);
+    } finally {
+      isWidgetSubmitting = false;
+    }
+  }
+
+  async function refreshWidgetData(index: number): Promise<void> {
+    const service = services[index];
+    if (!service || service.type !== "widget") return;
+    const ws = service as WidgetService;
+    const def = getWidgetById(ws.widgetType);
+    if (!def) return;
+
+    widgetData.set(index, { state: "loading", lastFetchedAt: Date.now() });
+    safeRender();
+
+    try {
+      const config = { ...ws.widgetConfig, url: ws.url };
+      const data = await def.fetchData(config);
+      widgetData.set(index, { state: "ok", data, lastFetchedAt: Date.now() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      widgetData.set(index, { state: "error", error: message, lastFetchedAt: Date.now() });
+    }
+
+    safeRender();
+  }
+
+  function renderWidgetDetail(index: number, width: number): string {
+    const service = services[index];
+    if (!service || service.type !== "widget") return "";
+    const ws = service as WidgetService;
+    const def = getWidgetById(ws.widgetType);
+    if (!def) return "Unknown widget type";
+
+    const data = widgetData.get(index);
+    if (!data || data.state === "loading") {
+      return "Loading widget data...";
+    }
+    if (data.state === "error") {
+      return `Error: ${data.error ?? "Unknown error"}`;
+    }
+
+    const lines = def.render(data.data, width);
+    return lines.join("\n");
+  }
 
   const statusText = (state: ServiceHealth["state"]): string => {
     if (state === "online") {
@@ -1260,6 +1476,7 @@ async function main() {
 
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
+      detailsWidgetContent.content = "";
 
       footerText.content = "↑/↓ fields • ←/→ toggle • Type interval seconds • Enter save • Esc cancel";
     } else if (isFormActive) {
@@ -1310,6 +1527,7 @@ async function main() {
 
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
+      detailsWidgetContent.content = "";
 
       footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type/paste name/url/group/icon • Enter save • Esc cancel";
     } else if (isSearchMode) {
@@ -1341,8 +1559,142 @@ async function main() {
 
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
+      detailsWidgetContent.content = "";
 
       footerText.content = "Type to fuzzy search • Enter Google search • Esc cancel";
+    } else if (isWidgetPickerActive) {
+      detailsPanel.title = "Widgets";
+
+      detailsTitle.content = "Select a widget:";
+      detailsTitle.fg = COLORS.focused;
+
+      const cardWidth = Math.max(14, contentWidth);
+      const cards: string[] = [];
+
+      for (let i = 0; i < WIDGET_REGISTRY.length; i++) {
+        const w = WIDGET_REGISTRY[i];
+        const focused = i === widgetPickerIndex;
+        const topBorder = focused
+          ? `╔${"═".repeat(Math.max(2, cardWidth - 2))}╗`
+          : `┌${"─".repeat(Math.max(2, cardWidth - 2))}┐`;
+        const bottomBorder = focused
+          ? `╚${"═".repeat(Math.max(2, cardWidth - 2))}╝`
+          : `└${"─".repeat(Math.max(2, cardWidth - 2))}┘`;
+        const side = focused ? "║" : "│";
+        const namePrefix = focused ? "▶ " : "  ";
+        const nameLine = `${side}${namePrefix}${truncate(`${w.icon} ${w.name}`, cardWidth - 4).padEnd(cardWidth - 4)}${side}`;
+        const descLine = `${side}  ${truncate(w.description, cardWidth - 4).padEnd(cardWidth - 4)}${side}`;
+
+        cards.push(topBorder);
+        cards.push(nameLine);
+        cards.push(descLine);
+        cards.push(bottomBorder);
+        if (i < WIDGET_REGISTRY.length - 1) {
+          cards.push("");
+        }
+      }
+
+      detailsUrl.content = cards.join("\n");
+      detailsUrl.fg = COLORS.text;
+
+      detailsHealth.content = "";
+      detailsHealth.fg = COLORS.text;
+      detailsChecked.content = "";
+      detailsChecked.fg = COLORS.text;
+      detailsError.content = "";
+      detailsError.fg = COLORS.text;
+      detailsRuntime.content = "";
+      detailsRuntime.fg = COLORS.text;
+      detailsCpu.content = "";
+      detailsCpu.fg = COLORS.text;
+      detailsRam.content = "";
+      detailsRam.fg = COLORS.text;
+      detailsDisk.content = "";
+      detailsDisk.fg = COLORS.text;
+      detailsWidgetContent.content = "";
+
+      footerText.content = "↑/↓ navigate • Enter select • Esc cancel";
+    } else if (isWidgetFormActive) {
+      const def = getWidgetById(widgetFormType);
+      detailsPanel.title = def ? `${widgetFormMode === "edit" ? "Edit" : "New"} ${def.name}` : "Widget";
+
+      const fields = def ? getWidgetFormFieldList(def) : [];
+
+      detailsTitle.content = "";
+      detailsTitle.fg = COLORS.focused;
+
+      const lines: string[] = [];
+      const fgLines: string[] = [];
+
+      for (let i = 0; i < fields.length; i++) {
+        const field = fields[i];
+        const focused = i === widgetFormFocusedIndex;
+        if (field.kind === "service") {
+          let value = widgetFormFields[field.name] ?? "";
+          if (field.name === "group") {
+            const groups = getDistinctGroupNames(services);
+            if (!value.trim()) {
+              value = groups.length > 0 ? "(none) ←/→ existing" : "(none)";
+            } else {
+              const idx = groups.indexOf(value);
+              if (idx >= 0) {
+                value = `${value} (${idx + 1}/${groups.length})`;
+              } else {
+                value = `${value} (new)`;
+              }
+            }
+          }
+          lines.push(formFieldLine(field.label, value, focused, pw));
+        } else {
+          const value = widgetFormFields[field.field.name] ?? "";
+          lines.push(formFieldLine(field.field.label, value, focused, pw));
+        }
+        fgLines.push(focused ? COLORS.focused : COLORS.text);
+      }
+
+      detailsUrl.content = lines[0] ?? "";
+      detailsUrl.fg = fgLines[0] ?? COLORS.text;
+      detailsHealth.content = lines[1] ?? "";
+      detailsHealth.fg = fgLines[1] ?? COLORS.text;
+      detailsChecked.content = lines[2] ?? "";
+      detailsChecked.fg = fgLines[2] ?? COLORS.text;
+      detailsError.content = lines[3] ?? "";
+      detailsError.fg = fgLines[3] ?? COLORS.text;
+
+      let lineIdx = 4;
+      detailsRuntime.content = lines[lineIdx] ?? "";
+      detailsRuntime.fg = fgLines[lineIdx] ?? COLORS.text;
+      lineIdx++;
+      detailsCpu.content = lines[lineIdx] ?? "";
+      detailsCpu.fg = fgLines[lineIdx] ?? COLORS.text;
+      lineIdx++;
+      detailsRam.content = "";
+      detailsRam.fg = COLORS.text;
+      lineIdx++;
+      detailsDisk.content = lines[lineIdx] ?? "";
+      detailsDisk.fg = fgLines[lineIdx] ?? COLORS.text;
+      lineIdx++;
+
+      // If more widget fields exist, render them into widget content
+      if (lineIdx < lines.length) {
+        detailsWidgetContent.content = "\n" + lines.slice(lineIdx).join("\n");
+      } else {
+        detailsWidgetContent.content = "";
+      }
+
+      if (widgetFormError) {
+        const errorPrefix = "Error: ";
+        detailsRam.content =
+          errorPrefix +
+          truncate(widgetFormError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
+        detailsRam.fg = COLORS.offline;
+      } else {
+        const saveFocused = widgetFormFocusedIndex === fields.length;
+        detailsRam.content = `${saveFocused ? "> " : "  "}[Save]`;
+        detailsRam.fg = saveFocused ? COLORS.focused : COLORS.muted;
+      }
+
+      footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type to edit • Enter save • Esc cancel";
     } else if (activeServiceIndexes.length === 0) {
       detailsPanel.title = "Details";
 
@@ -1369,12 +1721,11 @@ async function main() {
       detailsRam.fg = COLORS.text;
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
+      detailsWidgetContent.content = "";
 
-      footerText.content = "n new service • s settings • f search • t toggle view • r refresh • Ctrl+C quit";
+      footerText.content = "n new service • w widgets • s settings • f search • t toggle view • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
-      const selectedHealth = health[selectedIndex];
-      const selectedRuntime = runtimeStats[selectedIndex];
 
       detailsPanel.title = truncate(capitalizeFirstLetter(selected.name), Math.max(3, pw - 4));
 
@@ -1387,82 +1738,112 @@ async function main() {
       detailsUrl.content = urlPrefix + truncate(selected.url, Math.max(3, contentWidth - urlPrefix.length));
       detailsUrl.fg = COLORS.text;
 
-      const healthPrefix = "Health: ";
-      const healthText = statusText(selectedHealth.state);
-      detailsHealth.content = healthPrefix + healthText;
-      detailsHealth.fg = statusColor(selectedHealth.state);
+      if (selected.type === "widget") {
+        const ws = selected as WidgetService;
+        const def = getWidgetById(ws.widgetType);
 
-      const typePrefix = "Type: ";
-      detailsChecked.content = typePrefix + selected.type;
-      detailsChecked.fg = COLORS.text;
+        detailsHealth.content = `Type: widget (${def?.name ?? ws.widgetType})`;
+        detailsHealth.fg = COLORS.text;
 
-      const groupPrefix = "Group: ";
-      const groupValue = isUngroupedService(selected) ? "ungrouped" : getServiceGroupLabel(selected).toLowerCase();
-      detailsError.content = groupPrefix + groupValue;
-      detailsError.fg = COLORS.text;
-
-      const runtimePrefix = "Runtime: ";
-
-      if (selectedRuntime.state === "available") {
-        const runtimeLabel = selectedRuntime.containerName
-          ? `Docker (${selectedRuntime.containerName})`
-          : "Docker";
-        detailsRuntime.content = "\n" + runtimePrefix + truncate(runtimeLabel, Math.max(3, contentWidth - runtimePrefix.length));
-        detailsRuntime.fg = COLORS.text;
-
-        const cpuPercent = parsePercent(selectedRuntime.cpuUsage);
-        detailsCpu.content = `\n${renderMetricBar("CPU", selectedRuntime.cpuUsage ?? "-", cpuPercent, pw)}`;
-        detailsCpu.fg = metricColor(cpuPercent);
-
-        const ramPercent = parsePercent(selectedRuntime.memoryPercent) ?? parseUsagePairPercent(selectedRuntime.memoryUsage);
-        const ramUsedValue = usagePairUsedValue(selectedRuntime.memoryUsage);
-        detailsRam.content = `\n${renderMetricBar("RAM", ramUsedValue, ramPercent, pw)}`;
-        detailsRam.fg = metricColor(ramPercent);
-
-        const diskPercent = diskSizePercent(selectedRuntime.diskSizeBytes);
-        detailsDisk.content = `\n${renderMetricBar("Disk", selectedRuntime.diskSize ?? "-", diskPercent, pw)}`;
-        detailsDisk.fg = metricColor(diskPercent);
-      } else if (selectedRuntime.state === "not-applicable") {
+        detailsChecked.content = "";
+        detailsChecked.fg = COLORS.text;
+        detailsError.content = "";
+        detailsError.fg = COLORS.text;
         detailsRuntime.content = "";
         detailsRuntime.fg = COLORS.text;
-
         detailsCpu.content = "";
         detailsCpu.fg = COLORS.text;
         detailsRam.content = "";
         detailsRam.fg = COLORS.text;
         detailsDisk.content = "";
         detailsDisk.fg = COLORS.text;
-      } else if (selectedRuntime.state === "unavailable") {
-        const runtimeMessage =
-          selectedRuntime.errorCode === "CONTAINER_NOT_FOUND"
-            ? "No container linked"
-            : selectedRuntime.errorCode === "DOCKER_DAEMON_UNAVAILABLE" || selectedRuntime.errorCode === "DOCKER_NOT_INSTALLED"
-              ? "Docker unavailable"
-              : "Docker runtime unavailable";
 
-        detailsRuntime.content = "\n" + runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
-        detailsRuntime.fg = COLORS.offline;
+        const widgetContent = renderWidgetDetail(selectedIndex, pw);
+        detailsWidgetContent.content = widgetContent ? "\n" + widgetContent : "";
 
-        detailsCpu.content = "\nCPU: -";
-        detailsCpu.fg = COLORS.muted;
-        detailsRam.content = "\nRAM: -";
-        detailsRam.fg = COLORS.muted;
-        detailsDisk.content = "\nDisk: -";
-        detailsDisk.fg = COLORS.muted;
+        footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • w widgets • e edit • d delete • r refresh • Ctrl+C quit`;
       } else {
-        detailsRuntime.content = "";
-        detailsRuntime.fg = COLORS.text;
+        const selectedHealth = health[selectedIndex];
+        const selectedRuntime = runtimeStats[selectedIndex];
 
-        detailsCpu.content = "";
-        detailsCpu.fg = COLORS.text;
-        detailsRam.content = "";
-        detailsRam.fg = COLORS.text;
-        detailsDisk.content = "";
-        detailsDisk.fg = COLORS.text;
+        const healthPrefix = "Health: ";
+        const healthText = statusText(selectedHealth.state);
+        detailsHealth.content = healthPrefix + healthText;
+        detailsHealth.fg = statusColor(selectedHealth.state);
+
+        const typePrefix = "Type: ";
+        detailsChecked.content = typePrefix + selected.type;
+        detailsChecked.fg = COLORS.text;
+
+        const groupPrefix = "Group: ";
+        const groupValue = isUngroupedService(selected) ? "ungrouped" : getServiceGroupLabel(selected).toLowerCase();
+        detailsError.content = groupPrefix + groupValue;
+        detailsError.fg = COLORS.text;
+
+        const runtimePrefix = "Runtime: ";
+
+        if (selectedRuntime.state === "available") {
+          const runtimeLabel = selectedRuntime.containerName
+            ? `Docker (${selectedRuntime.containerName})`
+            : "Docker";
+          detailsRuntime.content = "\n" + runtimePrefix + truncate(runtimeLabel, Math.max(3, contentWidth - runtimePrefix.length));
+          detailsRuntime.fg = COLORS.text;
+
+          const cpuPercent = parsePercent(selectedRuntime.cpuUsage);
+          detailsCpu.content = `\n${renderMetricBar("CPU", selectedRuntime.cpuUsage ?? "-", cpuPercent, pw)}`;
+          detailsCpu.fg = metricColor(cpuPercent);
+
+          const ramPercent = parsePercent(selectedRuntime.memoryPercent) ?? parseUsagePairPercent(selectedRuntime.memoryUsage);
+          const ramUsedValue = usagePairUsedValue(selectedRuntime.memoryUsage);
+          detailsRam.content = `\n${renderMetricBar("RAM", ramUsedValue, ramPercent, pw)}`;
+          detailsRam.fg = metricColor(ramPercent);
+
+          const diskPercent = diskSizePercent(selectedRuntime.diskSizeBytes);
+          detailsDisk.content = `\n${renderMetricBar("Disk", selectedRuntime.diskSize ?? "-", diskPercent, pw)}`;
+          detailsDisk.fg = metricColor(diskPercent);
+        } else if (selectedRuntime.state === "not-applicable") {
+          detailsRuntime.content = "";
+          detailsRuntime.fg = COLORS.text;
+
+          detailsCpu.content = "";
+          detailsCpu.fg = COLORS.text;
+          detailsRam.content = "";
+          detailsRam.fg = COLORS.text;
+          detailsDisk.content = "";
+          detailsDisk.fg = COLORS.text;
+        } else if (selectedRuntime.state === "unavailable") {
+          const runtimeMessage =
+            selectedRuntime.errorCode === "CONTAINER_NOT_FOUND"
+              ? "No container linked"
+              : selectedRuntime.errorCode === "DOCKER_DAEMON_UNAVAILABLE" || selectedRuntime.errorCode === "DOCKER_NOT_INSTALLED"
+                ? "Docker unavailable"
+                : "Docker runtime unavailable";
+
+          detailsRuntime.content = "\n" + runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
+          detailsRuntime.fg = COLORS.offline;
+
+          detailsCpu.content = "\nCPU: -";
+          detailsCpu.fg = COLORS.muted;
+          detailsRam.content = "\nRAM: -";
+          detailsRam.fg = COLORS.muted;
+          detailsDisk.content = "\nDisk: -";
+          detailsDisk.fg = COLORS.muted;
+        } else {
+          detailsRuntime.content = "";
+          detailsRuntime.fg = COLORS.text;
+
+          detailsCpu.content = "";
+          detailsCpu.fg = COLORS.text;
+          detailsRam.content = "";
+          detailsRam.fg = COLORS.text;
+          detailsDisk.content = "";
+          detailsDisk.fg = COLORS.text;
+        }
+
+        detailsWidgetContent.content = "";
+
+        footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • w widgets • Enter open • e edit • d delete • r refresh • Ctrl+C quit`;
       }
-
-
-      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • Enter open • e edit • d delete • r refresh • Ctrl+C quit`;
     }
   };
 
@@ -1610,6 +1991,17 @@ async function main() {
       return;
     }
 
+    // Refresh widget data for visible widget services
+    for (let i = 0; i < services.length; i++) {
+      if (services[i].type === "widget") {
+        const data = widgetData.get(i);
+        const shouldRefresh = !data || !data.lastFetchedAt || (Date.now() - data.lastFetchedAt > 30_000);
+        if (shouldRefresh) {
+          void refreshWidgetData(i);
+        }
+      }
+    }
+
     safeRender();
   };
 
@@ -1620,7 +2012,7 @@ async function main() {
       return 0;
     }
 
-    const isServiceView = !isSettingsFormActive && !isFormActive && !isSearchMode && services.length > 0;
+    const isServiceView = !isSettingsFormActive && !isFormActive && !isSearchMode && !isWidgetPickerActive && !isWidgetFormActive && services.length > 0;
     if (isServiceView) {
       return Math.max(1_000, globalSettings.selectedAutoRefreshIntervalSec * 1_000);
     }
@@ -1944,6 +2336,181 @@ async function main() {
       return;
     }
 
+    if (isWidgetPickerActive) {
+      if (event.name === "escape") {
+        isWidgetPickerActive = false;
+        widgetPickerIndex = 0;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "up") {
+        widgetPickerIndex = (widgetPickerIndex - 1 + WIDGET_REGISTRY.length) % WIDGET_REGISTRY.length;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "down") {
+        widgetPickerIndex = (widgetPickerIndex + 1) % WIDGET_REGISTRY.length;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "return" || event.name === "enter") {
+        const def = WIDGET_REGISTRY[widgetPickerIndex];
+        if (def) {
+          isWidgetPickerActive = false;
+          resetWidgetForm(def.id);
+          isWidgetFormActive = true;
+          safeRender();
+        }
+        event.preventDefault();
+        return;
+      }
+
+      event.preventDefault();
+      return;
+    }
+
+    if (isWidgetFormActive) {
+      widgetFormError = "";
+
+      if (event.name === "escape") {
+        isWidgetFormActive = false;
+        widgetFormError = "";
+        if (widgetFormMode === "edit" && widgetEditingIndex >= 0) {
+          selectedIndex = widgetEditingIndex;
+        }
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      const def = getWidgetById(widgetFormType);
+      const fields = def ? getWidgetFormFieldList(def) : [];
+      const maxFieldIndex = fields.length;
+
+      if (event.name === "up") {
+        widgetFormFocusedIndex = (widgetFormFocusedIndex - 1 + maxFieldIndex + 1) % (maxFieldIndex + 1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "down") {
+        widgetFormFocusedIndex = (widgetFormFocusedIndex + 1) % (maxFieldIndex + 1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "left") {
+        const field = fields[widgetFormFocusedIndex];
+        if (field?.kind === "service" && field.name === "group") {
+          const groups = getDistinctGroupNames(services);
+          const current = widgetFormFields.group.trim();
+          const idx = groups.indexOf(current);
+          const nextIdx = idx >= 0 ? (idx - 1 + groups.length) % groups.length : groups.length - 1;
+          widgetFormFields.group = groups[nextIdx] ?? "";
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+        if (field?.kind === "service" && field.name === "icon") {
+          const current = widgetFormFields.icon.trim();
+          const idx = ICON_PRESETS.indexOf(current);
+          const nextIdx = idx >= 0 ? (idx - 1 + ICON_PRESETS.length) % ICON_PRESETS.length : ICON_PRESETS.length - 1;
+          widgetFormFields.icon = ICON_PRESETS[nextIdx] ?? "";
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+        if (field?.kind === "widget" && field.field.type === "select" && field.field.options) {
+          const current = widgetFormFields[field.field.name] ?? "";
+          const opts = field.field.options;
+          const idx = opts.indexOf(current);
+          const nextIdx = idx >= 0 ? (idx - 1 + opts.length) % opts.length : opts.length - 1;
+          widgetFormFields[field.field.name] = opts[nextIdx] ?? "";
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+      }
+
+      if (event.name === "right") {
+        const field = fields[widgetFormFocusedIndex];
+        if (field?.kind === "service" && field.name === "group") {
+          const groups = getDistinctGroupNames(services);
+          const current = widgetFormFields.group.trim();
+          const idx = groups.indexOf(current);
+          const nextIdx = idx >= 0 ? (idx + 1) % groups.length : 0;
+          widgetFormFields.group = groups[nextIdx] ?? "";
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+        if (field?.kind === "service" && field.name === "icon") {
+          const current = widgetFormFields.icon.trim();
+          const idx = ICON_PRESETS.indexOf(current);
+          const nextIdx = idx >= 0 ? (idx + 1) % ICON_PRESETS.length : 0;
+          widgetFormFields.icon = ICON_PRESETS[nextIdx] ?? "";
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+        if (field?.kind === "widget" && field.field.type === "select" && field.field.options) {
+          const current = widgetFormFields[field.field.name] ?? "";
+          const opts = field.field.options;
+          const idx = opts.indexOf(current);
+          const nextIdx = idx >= 0 ? (idx + 1) % opts.length : 0;
+          widgetFormFields[field.field.name] = opts[nextIdx] ?? "";
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+      }
+
+      if (event.name === "return" || event.name === "enter") {
+        if (widgetFormFocusedIndex === maxFieldIndex) {
+          void submitWidgetForm();
+          event.preventDefault();
+          return;
+        }
+      }
+
+      if (event.name === "backspace") {
+        const field = fields[widgetFormFocusedIndex];
+        if (field?.kind === "service") {
+          widgetFormFields[field.name] = (widgetFormFields[field.name] ?? "").slice(0, -1);
+          safeRender();
+        } else if (field?.kind === "widget") {
+          widgetFormFields[field.field.name] = (widgetFormFields[field.field.name] ?? "").slice(0, -1);
+          safeRender();
+        }
+        event.preventDefault();
+        return;
+      }
+
+      if (event.sequence && !event.ctrl && !event.meta && !/[\x00-\x1F\x7F]/.test(event.sequence)) {
+        const field = fields[widgetFormFocusedIndex];
+        if (field?.kind === "service") {
+          widgetFormFields[field.name] = (widgetFormFields[field.name] ?? "") + event.sequence;
+          safeRender();
+        } else if (field?.kind === "widget") {
+          widgetFormFields[field.field.name] = (widgetFormFields[field.field.name] ?? "") + event.sequence;
+          safeRender();
+        }
+        event.preventDefault();
+        return;
+      }
+
+      event.preventDefault();
+      return;
+    }
+
     if (isSearchMode) {
       if (event.name === "escape") {
         isSearchMode = false;
@@ -2075,13 +2642,28 @@ async function main() {
       return;
     }
 
+    if ((event.sequence === "w" || event.name === "w") && !event.ctrl && !event.meta) {
+      isFormActive = false;
+      isSettingsFormActive = false;
+      isSearchMode = false;
+      isWidgetPickerActive = true;
+      widgetPickerIndex = 0;
+      safeRender();
+      event.preventDefault();
+      return;
+    }
+
     if (event.name === "return" || event.name === "enter") {
       const active = getActiveServiceIndexes();
       if (active.length > 0) {
         ensureSelectionWithinActive(active);
         const selected = services[selectedIndex];
-        const normalized = normalizeServiceUrl(selected.url);
-        void open(normalized);
+        if (selected.type === "widget") {
+          void refreshWidgetData(selectedIndex);
+        } else {
+          const normalized = normalizeServiceUrl(selected.url);
+          void open(normalized);
+        }
       }
       event.preventDefault();
       return;
@@ -2091,8 +2673,15 @@ async function main() {
       const active = getActiveServiceIndexes();
       if (active.length > 0) {
         ensureSelectionWithinActive(active);
-        startEditForm(selectedIndex);
-        safeRender();
+        const selected = services[selectedIndex];
+        if (selected.type === "widget") {
+          startWidgetEditForm(selectedIndex);
+          isWidgetFormActive = true;
+          safeRender();
+        } else {
+          startEditForm(selectedIndex);
+          safeRender();
+        }
       }
       event.preventDefault();
       return;
@@ -2143,6 +2732,23 @@ async function main() {
       if (pasted) {
         searchQuery += pasted;
         ensureSelectionWithinActive(getActiveServiceIndexes());
+        safeRender();
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (isWidgetFormActive) {
+      const def = getWidgetById(widgetFormType);
+      const fields = def ? getWidgetFormFieldList(def) : [];
+      const field = fields[widgetFormFocusedIndex];
+      const pasted = textDecoder.decode(event.bytes).replace(/[\r\n]+/g, "");
+      if (pasted) {
+        if (field?.kind === "service") {
+          widgetFormFields[field.name] = (widgetFormFields[field.name] ?? "") + pasted;
+        } else if (field?.kind === "widget") {
+          widgetFormFields[field.field.name] = (widgetFormFields[field.field.name] ?? "") + pasted;
+        }
         safeRender();
       }
       event.preventDefault();
