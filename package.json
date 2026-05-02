@@ -1,6 +1,6 @@
 {
   "name": "homestat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Terminal homepage dashboard for self-hosted services.",
   "keywords": [
     "terminal",
@@ -31,7 +31,8 @@
     "./package.json": "./package.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "bun": ">=1.3.0"
   },
   "publishConfig": {
     "access": "public"
