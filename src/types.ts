@@ -14,8 +14,16 @@ export interface Service {
   bookmarkedAt?: number | null;
 }
 
+export interface GlobalSettings {
+  autoRefreshEnabled: boolean;
+  autoRefreshIntervalSec: number;
+  autoRefreshDockerDiscovery: boolean;
+  refreshOnStart: boolean;
+}
+
 export interface Config {
   services: Service[];
+  settings: GlobalSettings;
 }
 
 export interface ServiceHealth {

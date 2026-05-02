@@ -15,10 +15,8 @@ import { loadConfig, saveConfig } from "./config.ts";
 import {
   createInitialHealth,
   evaluateStatus,
-  HEALTH_CHECK_INTERVAL_MS,
   HEALTH_CHECK_TIMEOUT_MS,
   normalizeServiceUrl,
-  relativeTime,
 } from "./health.ts";
 import {
   discoverHomestatDockerServices,
@@ -48,6 +46,8 @@ const COLORS = {
   cardBorderFocused: "#a78bfa",
   iconBg: "#14532d",
   iconFg: "#4ade80",
+  bookmarkBg: "#dcfce7",
+  bookmarkFg: "#16a34a",
 } as const;
 
 const ICON_PRESETS = ["•", "🐳", "⚡", "🚀", "🗄️", "🌐", "🔒", "📊", "💾", "🔧", "📡", "🖥️"];
@@ -155,6 +155,19 @@ function parseUsagePairPercent(usage: string | null): number | null {
   return Math.max(0, Math.min(100, (used / total) * 100));
 }
 
+function usagePairUsedValue(usage: string | null): string {
+  if (!usage) {
+    return "-";
+  }
+
+  if (!usage.includes("/")) {
+    return usage;
+  }
+
+  const [usedRaw] = usage.split("/").map((part) => part.trim());
+  return usedRaw || "-";
+}
+
 function metricColor(percent: number | null): string {
   if (percent === null) {
     return COLORS.text;
@@ -196,6 +209,24 @@ function diskSizePercent(bytes: number | null): number | null {
   // Visual scale only (not a quota): 20 GiB ~= 100%.
   const referenceBytes = 20 * 1_073_741_824;
   return Math.max(0, Math.min(100, (bytes / referenceBytes) * 100));
+}
+
+function formatAggregatePercent(value: number | null): string {
+  if (value === null) {
+    return "-";
+  }
+
+  return `${Math.round(value)}%`;
+}
+
+function aggregateMetric(values: Array<number | null>): number | null {
+  const numericValues = values.filter((value): value is number => value !== null && Number.isFinite(value));
+  if (numericValues.length === 0) {
+    return null;
+  }
+
+  const total = numericValues.reduce((sum, current) => sum + current, 0);
+  return total / numericValues.length;
 }
 
 async function checkService(
@@ -261,6 +292,7 @@ function createInitialRuntimeStats(): ServiceRuntimeStats {
 async function main() {
   const config = await loadConfig();
   const configuredServices = config.services;
+  const globalSettings = { ...config.settings };
   const services = configuredServices.filter((service) => service.source !== "docker" && service.enabled !== false);
 
   const getConfiguredByContainerId = (service: Pick<Service, "containerId">): Service | null => {
@@ -277,9 +309,10 @@ async function main() {
     return configured?.enabled === false;
   };
 
-  async function saveConfiguredServices(): Promise<void> {
-    await saveConfig({ services: configuredServices });
+  async function saveConfiguredState(): Promise<void> {
+    await saveConfig({ services: configuredServices, settings: globalSettings });
   }
+
 
   async function refreshDockerDiscoveredServices(): Promise<void> {
     const dockerDiscovery = await discoverHomestatDockerServices("🐳");
@@ -309,7 +342,7 @@ async function main() {
     }
 
     if (configChanged) {
-      await saveConfiguredServices();
+      await saveConfiguredState();
     }
 
     const enabledStaticServices = configuredServices.filter(
@@ -384,7 +417,7 @@ async function main() {
     width: "100%",
     height: 1,
     flexDirection: "row",
-    justifyContent: "center",
+    justifyContent: "space-between",
     alignItems: "center",
   });
 
@@ -393,7 +426,15 @@ async function main() {
     content: "",
     fg: COLORS.muted,
   });
+
+  const footerAggregateText = new TextRenderable(renderer, {
+    id: "footer-aggregate-text",
+    content: "",
+    fg: COLORS.muted,
+  });
+
   footer.add(footerText);
+  footer.add(footerAggregateText);
 
   const cardsViewport = new BoxRenderable(renderer, {
     id: "cards-viewport",
@@ -710,6 +751,98 @@ async function main() {
   let formMode: "add" | "edit" = "add";
   let editingIndex = -1;
 
+  let isSettingsFormActive = false;
+  const settingsFormFields = {
+    autoRefreshEnabled: globalSettings.autoRefreshEnabled,
+    autoRefreshIntervalSec: String(globalSettings.autoRefreshIntervalSec),
+    autoRefreshDockerDiscovery: globalSettings.autoRefreshDockerDiscovery,
+    refreshOnStart: globalSettings.refreshOnStart,
+  };
+  let settingsFocusedFieldIndex = 0;
+  let settingsFormError = "";
+  let isSettingsSubmitting = false;
+
+  function resetSettingsForm(): void {
+    settingsFormFields.autoRefreshEnabled = globalSettings.autoRefreshEnabled;
+    settingsFormFields.autoRefreshIntervalSec = String(globalSettings.autoRefreshIntervalSec);
+    settingsFormFields.autoRefreshDockerDiscovery = globalSettings.autoRefreshDockerDiscovery;
+    settingsFormFields.refreshOnStart = globalSettings.refreshOnStart;
+    settingsFocusedFieldIndex = 0;
+    settingsFormError = "";
+  }
+
+  function startSettingsForm(): void {
+    resetSettingsForm();
+    isSettingsFormActive = true;
+  }
+
+  function settingsToggleLabel(value: boolean): string {
+    return value ? "On" : "Off";
+  }
+
+  function toggleFocusedSettingBoolean(direction: 1 | -1 = 1): void {
+    if (settingsFocusedFieldIndex === 0) {
+      settingsFormFields.autoRefreshEnabled = direction > 0 ? true : false;
+      return;
+    }
+
+    if (settingsFocusedFieldIndex === 2) {
+      settingsFormFields.autoRefreshDockerDiscovery = direction > 0 ? true : false;
+      return;
+    }
+
+    if (settingsFocusedFieldIndex === 3) {
+      settingsFormFields.refreshOnStart = direction > 0 ? true : false;
+    }
+  }
+
+  function settingsFieldLine(label: string, value: string, focused: boolean, panelWidth: number): string {
+    return formFieldLine(label, value, focused, panelWidth);
+  }
+
+  function nextSettingsField(): void {
+    const max = 4;
+    settingsFocusedFieldIndex = (settingsFocusedFieldIndex + 1) % (max + 1);
+  }
+
+  function prevSettingsField(): void {
+    const max = 4;
+    settingsFocusedFieldIndex = (settingsFocusedFieldIndex - 1 + max + 1) % (max + 1);
+  }
+
+  async function submitSettingsForm(): Promise<void> {
+    if (isSettingsSubmitting) {
+      return;
+    }
+
+    isSettingsSubmitting = true;
+
+    try {
+      const parsedInterval = Number(settingsFormFields.autoRefreshIntervalSec.trim());
+      if (!Number.isFinite(parsedInterval) || parsedInterval <= 0) {
+        settingsFormError = "Error: Interval must be a positive number of seconds.";
+        safeRender();
+        return;
+      }
+
+      const roundedInterval = Math.max(1, Math.round(parsedInterval));
+
+      globalSettings.autoRefreshEnabled = settingsFormFields.autoRefreshEnabled;
+      globalSettings.autoRefreshIntervalSec = roundedInterval;
+      globalSettings.autoRefreshDockerDiscovery = settingsFormFields.autoRefreshDockerDiscovery;
+      globalSettings.refreshOnStart = settingsFormFields.refreshOnStart;
+
+      await saveConfiguredState();
+      configureHealthInterval();
+
+      isSettingsFormActive = false;
+      settingsFormError = "";
+      safeRender();
+    } finally {
+      isSettingsSubmitting = false;
+    }
+  }
+
   function syncGroupOptionIndex(): void {
     const groups = getDistinctGroupNames(services);
     const group = formFields.group.trim();
@@ -793,6 +926,7 @@ async function main() {
     formError = "";
     formMode = "edit";
     editingIndex = index;
+    isSettingsFormActive = false;
     isFormActive = true;
   }
 
@@ -855,7 +989,7 @@ async function main() {
           Object.assign(configured, serviceData, { source: "docker" });
         }
 
-        await saveConfiguredServices();
+        await saveConfiguredState();
 
         isFormActive = false;
         formError = "";
@@ -874,7 +1008,7 @@ async function main() {
       serviceData.enabled = true;
       configuredServices.push(serviceData);
       services.splice(insertIndex, 0, serviceData);
-      await saveConfiguredServices();
+      await saveConfiguredState();
 
       isFormActive = false;
       selectedIndex = insertIndex;
@@ -919,7 +1053,7 @@ async function main() {
     }
 
     services.splice(index, 1);
-    await saveConfiguredServices();
+    await saveConfiguredState();
 
     syncStateWithServices();
 
@@ -973,7 +1107,7 @@ async function main() {
     safeRender();
 
     try {
-      await saveConfiguredServices();
+      await saveConfiguredState();
     } catch (error) {
       // Restore in-memory state before escalating this persistence failure.
       service.bookmarked = previousBookmarked;
@@ -1052,8 +1186,9 @@ async function main() {
       cardIconTexts[slotIndex].content = t`${iconChunk}`;
 
       const badgeColor = statusColor(rowHealth.state);
+      const bookmarkBadge = fg(COLORS.bookmarkFg)("⭐");
       cardStatusTexts[slotIndex].content = service.bookmarked
-        ? t`${fg(badgeColor)(`[ ${badge} ]`)} ${fg(COLORS.muted)("★")}`
+        ? t`${bookmarkBadge} ${fg(badgeColor)(`[ ${badge} ]`)}`
         : t`${fg(badgeColor)(`[ ${badge} ]`)}`;
 
       const nameColor = focused ? COLORS.focused : COLORS.text;
@@ -1078,7 +1213,96 @@ async function main() {
     const pw = detailsPanel.width;
     const contentWidth = Math.max(10, pw - 4);
 
-    if (isFormActive) {
+    const aggregateCpuPercent = aggregateMetric(
+      runtimeStats.map((stats) => (stats.state === "available" ? parsePercent(stats.cpuUsage) : null)),
+    );
+    const aggregateRamPercent = aggregateMetric(
+      runtimeStats.map((stats) =>
+        stats.state === "available"
+          ? (parsePercent(stats.memoryPercent) ?? parseUsagePairPercent(stats.memoryUsage))
+          : null,
+      ),
+    );
+    const aggregateDiskPercent = aggregateMetric(
+      runtimeStats.map((stats) => (stats.state === "available" ? diskSizePercent(stats.diskSizeBytes) : null)),
+    );
+
+    footerAggregateText.content = `CPU=${formatAggregatePercent(aggregateCpuPercent)}, RAM=${formatAggregatePercent(aggregateRamPercent)}, DISK=${formatAggregatePercent(aggregateDiskPercent)}`;
+
+    if (isSettingsFormActive) {
+      detailsPanel.title = "Global settings";
+
+      const FIELDS = {
+        autoRefreshEnabled: 0,
+        autoRefreshIntervalSec: 1,
+        autoRefreshDockerDiscovery: 2,
+        refreshOnStart: 3,
+        save: 4,
+      };
+
+      detailsTitle.content = "";
+      detailsTitle.fg = COLORS.focused;
+
+      const autoRefreshFocused = settingsFocusedFieldIndex === FIELDS.autoRefreshEnabled;
+      detailsUrl.content = settingsFieldLine(
+        "Auto refresh",
+        `${settingsToggleLabel(settingsFormFields.autoRefreshEnabled)} (←/→)`,
+        autoRefreshFocused,
+        pw,
+      );
+      detailsUrl.fg = autoRefreshFocused ? COLORS.focused : COLORS.text;
+
+      const intervalFocused = settingsFocusedFieldIndex === FIELDS.autoRefreshIntervalSec;
+      detailsHealth.content = settingsFieldLine(
+        "Interval sec",
+        settingsFormFields.autoRefreshIntervalSec,
+        intervalFocused,
+        pw,
+      );
+      detailsHealth.fg = intervalFocused ? COLORS.focused : COLORS.text;
+
+      const dockerDiscoveryFocused = settingsFocusedFieldIndex === FIELDS.autoRefreshDockerDiscovery;
+      detailsChecked.content = settingsFieldLine(
+        "Auto Docker scan",
+        `${settingsToggleLabel(settingsFormFields.autoRefreshDockerDiscovery)} (←/→)`,
+        dockerDiscoveryFocused,
+        pw,
+      );
+      detailsChecked.fg = dockerDiscoveryFocused ? COLORS.focused : COLORS.text;
+
+      const refreshOnStartFocused = settingsFocusedFieldIndex === FIELDS.refreshOnStart;
+      detailsError.content = settingsFieldLine(
+        "Refresh on start",
+        `${settingsToggleLabel(settingsFormFields.refreshOnStart)} (←/→)`,
+        refreshOnStartFocused,
+        pw,
+      );
+      detailsError.fg = refreshOnStartFocused ? COLORS.focused : COLORS.text;
+
+      detailsRuntime.content = "";
+      detailsRuntime.fg = COLORS.text;
+      detailsCpu.content = "";
+      detailsCpu.fg = COLORS.text;
+
+      if (settingsFormError) {
+        const errorPrefix = "Error: ";
+        detailsRam.content =
+          errorPrefix +
+          truncate(settingsFormError.slice(errorPrefix.length), Math.max(3, contentWidth - errorPrefix.length));
+        detailsRam.fg = COLORS.offline;
+      } else {
+        const saveFocused = settingsFocusedFieldIndex === FIELDS.save;
+        detailsRam.content = `${saveFocused ? "> " : "  "}[Save]`;
+        detailsRam.fg = saveFocused ? COLORS.focused : COLORS.muted;
+      }
+
+      detailsDisk.content = "";
+      detailsDisk.fg = COLORS.text;
+
+      footerText.content = "↑/↓ fields • ←/→ toggle • Type interval seconds • Enter save • Esc cancel";
+    } else if (isFormActive) {
+      detailsPanel.title = formMode === "edit" ? "Edit service" : "New service";
+
       const FIELDS = {
         serviceName: 0,
         url: 1,
@@ -1088,7 +1312,7 @@ async function main() {
         save: 5,
       };
 
-      detailsTitle.content = formMode === "edit" ? "✎ Edit Service" : "+ Add New Service";
+      detailsTitle.content = "";
       detailsTitle.fg = COLORS.focused;
 
       const serviceNameFocused = focusedFieldIndex === FIELDS.serviceName;
@@ -1129,6 +1353,8 @@ async function main() {
 
       footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type/paste name/url/group/icon/container • Enter save • Esc cancel";
     } else if (activeServiceIndexes.length === 0) {
+      detailsPanel.title = "Details";
+
       detailsTitle.content = "No Services Yet";
       detailsTitle.fg = COLORS.focused;
 
@@ -1153,11 +1379,13 @@ async function main() {
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "n new service • t toggle view • r refresh • Ctrl+C quit";
+      footerText.content = "n new service • s settings • t toggle view • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
       const selectedRuntime = runtimeStats[selectedIndex];
+
+      detailsPanel.title = truncate(capitalizeFirstLetter(selected.name), Math.max(3, pw - 4));
 
       const bookmarkPrefix = selected.bookmarked ? "★ " : "";
       const titlePrefix = `${selected.icon ?? "•"} ${bookmarkPrefix}`;
@@ -1174,12 +1402,10 @@ async function main() {
       detailsHealth.content = healthPrefix + healthText;
       detailsHealth.fg = statusColor(selectedHealth.state);
 
-      const checkedPrefix = "Last checked: ";
-      detailsChecked.content = checkedPrefix + truncate(relativeTime(selectedHealth.lastCheckedAt), Math.max(3, contentWidth - checkedPrefix.length));
+      detailsChecked.content = "";
       detailsChecked.fg = COLORS.text;
 
-      const errorPrefix = "Error: ";
-      detailsError.content = errorPrefix + truncate(selectedHealth.errorDetails ?? "none", Math.max(3, contentWidth - errorPrefix.length));
+      detailsError.content = "";
       detailsError.fg = COLORS.text;
 
       const runtimePrefix = "Runtime: ";
@@ -1192,26 +1418,30 @@ async function main() {
         detailsRuntime.fg = COLORS.text;
 
         const cpuPercent = parsePercent(selectedRuntime.cpuUsage);
-        detailsCpu.content = renderMetricBar("CPU", selectedRuntime.cpuUsage ?? "-", cpuPercent, pw);
+        detailsCpu.content = `\n${renderMetricBar("CPU", selectedRuntime.cpuUsage ?? "-", cpuPercent, pw)}`;
         detailsCpu.fg = metricColor(cpuPercent);
 
         const ramPercent = parsePercent(selectedRuntime.memoryPercent) ?? parseUsagePairPercent(selectedRuntime.memoryUsage);
-        detailsRam.content = renderMetricBar("RAM", selectedRuntime.memoryUsage ?? "-", ramPercent, pw);
+        const ramUsedValue = usagePairUsedValue(selectedRuntime.memoryUsage);
+        detailsRam.content = `\n${renderMetricBar("RAM", ramUsedValue, ramPercent, pw)}`;
         detailsRam.fg = metricColor(ramPercent);
 
         const diskPercent = diskSizePercent(selectedRuntime.diskSizeBytes);
-        detailsDisk.content = renderMetricBar("Disk", selectedRuntime.diskSize ?? "-", diskPercent, pw);
+        detailsDisk.content = `\n${renderMetricBar("Disk", selectedRuntime.diskSize ?? "-", diskPercent, pw)}`;
         detailsDisk.fg = metricColor(diskPercent);
       } else if (selectedRuntime.state === "not-applicable") {
-        detailsRuntime.content = runtimePrefix + truncate("N/A (non-local service)", Math.max(3, contentWidth - runtimePrefix.length));
-        detailsRuntime.fg = COLORS.muted;
+        detailsChecked.content = "";
+        detailsChecked.fg = COLORS.text;
 
-        detailsCpu.content = "CPU: -";
-        detailsCpu.fg = COLORS.muted;
-        detailsRam.content = "RAM: -";
-        detailsRam.fg = COLORS.muted;
-        detailsDisk.content = "Disk: -";
-        detailsDisk.fg = COLORS.muted;
+        detailsRuntime.content = "";
+        detailsRuntime.fg = COLORS.text;
+
+        detailsCpu.content = "";
+        detailsCpu.fg = COLORS.text;
+        detailsRam.content = "";
+        detailsRam.fg = COLORS.text;
+        detailsDisk.content = "";
+        detailsDisk.fg = COLORS.text;
       } else if (selectedRuntime.state === "unavailable") {
         const runtimeMessage =
           selectedRuntime.errorCode === "CONTAINER_NOT_FOUND"
@@ -1223,26 +1453,26 @@ async function main() {
         detailsRuntime.content = runtimePrefix + truncate(runtimeMessage, Math.max(3, contentWidth - runtimePrefix.length));
         detailsRuntime.fg = COLORS.offline;
 
-        detailsCpu.content = "CPU: -";
+        detailsCpu.content = "\nCPU: -";
         detailsCpu.fg = COLORS.muted;
-        detailsRam.content = "RAM: -";
+        detailsRam.content = "\nRAM: -";
         detailsRam.fg = COLORS.muted;
-        detailsDisk.content = "Disk: -";
+        detailsDisk.content = "\nDisk: -";
         detailsDisk.fg = COLORS.muted;
       } else {
-        detailsRuntime.content = runtimePrefix + "loading…";
-        detailsRuntime.fg = COLORS.muted;
+        detailsRuntime.content = "";
+        detailsRuntime.fg = COLORS.text;
 
-        detailsCpu.content = "CPU: -";
-        detailsCpu.fg = COLORS.muted;
-        detailsRam.content = "RAM: -";
-        detailsRam.fg = COLORS.muted;
-        detailsDisk.content = "Disk: -";
-        detailsDisk.fg = COLORS.muted;
+        detailsCpu.content = "";
+        detailsCpu.fg = COLORS.text;
+        detailsRam.content = "";
+        detailsRam.fg = COLORS.text;
+        detailsDisk.content = "";
+        detailsDisk.fg = COLORS.text;
       }
 
 
-      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit`;
+      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • o open • b bookmark • e edit • d delete • r refresh • Ctrl+C quit`;
     }
   };
 
@@ -1353,7 +1583,7 @@ async function main() {
 
     service.containerId = nextContainerId;
     service.containerName = nextContainerName;
-    await saveConfiguredServices();
+    await saveConfiguredState();
   };
 
   const refreshServiceAndDetectContainer = async (index: number): Promise<void> => {
@@ -1392,24 +1622,44 @@ async function main() {
     safeRender();
   };
 
-  safeRender();
+  let healthInterval: ReturnType<typeof setInterval> | null = null;
 
-  const healthInterval = setInterval(() => {
-    void refreshHealth(false);
-  }, HEALTH_CHECK_INTERVAL_MS);
+  function configureHealthInterval(): void {
+    if (healthInterval) {
+      clearInterval(healthInterval);
+      healthInterval = null;
+    }
+
+    if (!globalSettings.autoRefreshEnabled) {
+      return;
+    }
+
+    const intervalMs = Math.max(1_000, globalSettings.autoRefreshIntervalSec * 1_000);
+    healthInterval = setInterval(() => {
+      void refreshHealth(globalSettings.autoRefreshDockerDiscovery);
+    }, intervalMs);
+  }
+
+  safeRender();
+  configureHealthInterval();
 
   const relativeInterval = setInterval(() => {
     safeRender();
   }, 1_000);
 
-  void refreshHealth(false);
+  if (globalSettings.refreshOnStart) {
+    void refreshHealth(globalSettings.autoRefreshDockerDiscovery);
+  }
 
   const stop = () => {
     if (stopped) {
       return;
     }
     stopped = true;
-    clearInterval(healthInterval);
+    if (healthInterval) {
+      clearInterval(healthInterval);
+      healthInterval = null;
+    }
     clearInterval(relativeInterval);
     renderer.destroy();
   };
@@ -1478,6 +1728,98 @@ async function main() {
     if (event.ctrl && event.name === "c") {
       event.preventDefault();
       exitGracefully();
+      return;
+    }
+
+    if (isSettingsFormActive) {
+      settingsFormError = "";
+
+      if (event.name === "escape") {
+        isSettingsFormActive = false;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "up") {
+        prevSettingsField();
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "down") {
+        nextSettingsField();
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "left") {
+        toggleFocusedSettingBoolean(-1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "right") {
+        toggleFocusedSettingBoolean(1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "space") {
+        if (settingsFocusedFieldIndex === 0) {
+          settingsFormFields.autoRefreshEnabled = !settingsFormFields.autoRefreshEnabled;
+          safeRender();
+        } else if (settingsFocusedFieldIndex === 2) {
+          settingsFormFields.autoRefreshDockerDiscovery = !settingsFormFields.autoRefreshDockerDiscovery;
+          safeRender();
+        } else if (settingsFocusedFieldIndex === 3) {
+          settingsFormFields.refreshOnStart = !settingsFormFields.refreshOnStart;
+          safeRender();
+        }
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "return" || event.name === "enter") {
+        if (settingsFocusedFieldIndex === 4) {
+          void submitSettingsForm();
+          event.preventDefault();
+          return;
+        }
+
+        if (settingsFocusedFieldIndex === 0 || settingsFocusedFieldIndex === 2 || settingsFocusedFieldIndex === 3) {
+          toggleFocusedSettingBoolean(1);
+          safeRender();
+          event.preventDefault();
+          return;
+        }
+      }
+
+      if (settingsFocusedFieldIndex === 1 && event.name === "backspace") {
+        settingsFormFields.autoRefreshIntervalSec = settingsFormFields.autoRefreshIntervalSec.slice(0, -1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (
+        settingsFocusedFieldIndex === 1 &&
+        event.sequence &&
+        !event.ctrl &&
+        !event.meta &&
+        /^[0-9]$/.test(event.sequence)
+      ) {
+        settingsFormFields.autoRefreshIntervalSec += event.sequence;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      event.preventDefault();
       return;
     }
 
@@ -1611,8 +1953,17 @@ async function main() {
     }
 
     if ((event.sequence === "n" || event.name === "n") && !event.ctrl && !event.meta) {
+      isSettingsFormActive = false;
       resetForm();
       isFormActive = true;
+      safeRender();
+      event.preventDefault();
+      return;
+    }
+
+    if ((event.sequence === "s" || event.name === "s") && !event.ctrl && !event.meta) {
+      isFormActive = false;
+      startSettingsForm();
       safeRender();
       event.preventDefault();
       return;
@@ -1677,6 +2028,16 @@ async function main() {
   });
 
   renderer.keyInput.on("paste", (event: PasteEvent) => {
+    if (isSettingsFormActive && settingsFocusedFieldIndex === 1) {
+      const pasted = textDecoder.decode(event.bytes).replace(/\D+/g, "");
+      if (pasted) {
+        settingsFormFields.autoRefreshIntervalSec += pasted;
+        safeRender();
+      }
+      event.preventDefault();
+      return;
+    }
+
     if (!isFormActive || !isTextField(focusedFieldIndex)) {
       event.preventDefault();
       return;

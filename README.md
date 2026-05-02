@@ -19,6 +19,12 @@ Create `~/.homestat/config.json`:
 
 ```json
 {
+  "settings": {
+    "autoRefreshEnabled": true,
+    "autoRefreshIntervalSec": 30,
+    "autoRefreshDockerDiscovery": false,
+    "refreshOnStart": true
+  },
   "services": [
     {
       "name": "Jellyfin",
@@ -46,6 +52,7 @@ Create `~/.homestat/config.json`:
 
 - `←` / `→` / `↑` / `↓`: navigate cards
 - `n`: add a new service (opens form in details panel)
+- `s`: open global settings form (auto-refresh, interval, docker auto-discovery, startup refresh)
 - `t`: toggle list view (All Services → each group → back to All Services)
 - `o`: open selected service in browser
 - `b`: toggle bookmark on selected service (shows a subtle `★` badge)

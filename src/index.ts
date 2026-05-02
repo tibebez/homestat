@@ -1,4 +1,4 @@
-export { CONFIG_PATH, loadConfig, saveConfig } from "./config.ts";
+export { CONFIG_PATH, DEFAULT_GLOBAL_SETTINGS, loadConfig, saveConfig } from "./config.ts";
 export {
   discoverHomestatDockerServices,
   fetchDockerContainerStats,
@@ -38,4 +38,4 @@ export {
   sortServicesBookmarkedFirst,
 } from "./services.ts";
 export type { ServiceListView } from "./services.ts";
-export type { Config, HealthState, Service, ServiceHealth } from "./types.ts";
+export type { Config, GlobalSettings, HealthState, Service, ServiceHealth } from "./types.ts";

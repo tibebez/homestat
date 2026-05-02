@@ -1,11 +1,18 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { Config } from "./types.ts";
+import type { Config, GlobalSettings } from "./types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".homestat", "config.json");
 
-function assertConfig(data: unknown): asserts data is Config {
+export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
+  autoRefreshEnabled: true,
+  autoRefreshIntervalSec: 30,
+  autoRefreshDockerDiscovery: false,
+  refreshOnStart: true,
+};
+
+function assertConfig(data: unknown): asserts data is { services: unknown[]; settings?: unknown } {
   if (!data || typeof data !== "object") {
     throw new Error("Config must be an object.");
   }
@@ -65,11 +72,62 @@ function assertConfig(data: unknown): asserts data is Config {
       throw new Error(`Service '${name}' has an invalid bookmarkedAt value; expected a number, null, or undefined.`);
     }
   }
+
+  const settings = (data as { settings?: unknown }).settings;
+  if (settings === undefined) {
+    return;
+  }
+
+  if (!settings || typeof settings !== "object") {
+    throw new Error("Config settings must be an object.");
+  }
+
+  const autoRefreshEnabled = (settings as { autoRefreshEnabled?: unknown }).autoRefreshEnabled;
+  if (autoRefreshEnabled !== undefined && typeof autoRefreshEnabled !== "boolean") {
+    throw new Error("Config settings has an invalid autoRefreshEnabled value; expected a boolean.");
+  }
+
+  const autoRefreshIntervalSec = (settings as { autoRefreshIntervalSec?: unknown }).autoRefreshIntervalSec;
+  if (
+    autoRefreshIntervalSec !== undefined &&
+    (typeof autoRefreshIntervalSec !== "number" || !Number.isFinite(autoRefreshIntervalSec) || autoRefreshIntervalSec <= 0)
+  ) {
+    throw new Error("Config settings has an invalid autoRefreshIntervalSec value; expected a positive number.");
+  }
+
+  const autoRefreshDockerDiscovery = (settings as { autoRefreshDockerDiscovery?: unknown }).autoRefreshDockerDiscovery;
+  if (autoRefreshDockerDiscovery !== undefined && typeof autoRefreshDockerDiscovery !== "boolean") {
+    throw new Error("Config settings has an invalid autoRefreshDockerDiscovery value; expected a boolean.");
+  }
+
+  const refreshOnStart = (settings as { refreshOnStart?: unknown }).refreshOnStart;
+  if (refreshOnStart !== undefined && typeof refreshOnStart !== "boolean") {
+    throw new Error("Config settings has an invalid refreshOnStart value; expected a boolean.");
+  }
+}
+
+function mergeGlobalSettings(settings?: Partial<GlobalSettings>): GlobalSettings {
+  return {
+    ...DEFAULT_GLOBAL_SETTINGS,
+    ...settings,
+    autoRefreshIntervalSec: Math.max(
+      1,
+      Math.round(settings?.autoRefreshIntervalSec ?? DEFAULT_GLOBAL_SETTINGS.autoRefreshIntervalSec),
+    ),
+  };
+}
+
+function normalizeConfig(config: { services: Config["services"]; settings?: Partial<GlobalSettings> }): Config {
+  return {
+    services: config.services,
+    settings: mergeGlobalSettings(config.settings),
+  };
 }
 
 export async function saveConfig(config: Config, path = CONFIG_PATH): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(config, null, 2), "utf8");
+  const normalized = normalizeConfig(config);
+  await writeFile(path, JSON.stringify(normalized, null, 2), "utf8");
 }
 
 export async function loadConfig(path = CONFIG_PATH): Promise<Config> {
@@ -100,5 +158,5 @@ export async function loadConfig(path = CONFIG_PATH): Promise<Config> {
   }
 
   assertConfig(parsed);
-  return parsed as Config;
+  return normalizeConfig(parsed as { services: Config["services"]; settings?: Partial<GlobalSettings> });
 }
