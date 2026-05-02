@@ -790,6 +790,7 @@ async function main() {
 
   let isWidgetPickerActive = false;
   let widgetPickerIndex = 0;
+  let widgetPickerScrollOffset = 0;
 
   let isWidgetFormActive = false;
   let widgetFormType = "";
@@ -1568,8 +1569,9 @@ async function main() {
       detailsTitle.content = "Select a widget:";
       detailsTitle.fg = COLORS.focused;
 
-      const cardWidth = Math.max(14, contentWidth);
+      const cardWidth = Math.max(10, contentWidth - 1);
       const cards: string[] = [];
+      const cardStride = 5;
 
       for (let i = 0; i < WIDGET_REGISTRY.length; i++) {
         const w = WIDGET_REGISTRY[i];
@@ -1581,8 +1583,7 @@ async function main() {
           ? `╚${"═".repeat(Math.max(2, cardWidth - 2))}╝`
           : `└${"─".repeat(Math.max(2, cardWidth - 2))}┘`;
         const side = focused ? "║" : "│";
-        const namePrefix = focused ? "▶ " : "  ";
-        const nameLine = `${side}${namePrefix}${truncate(`${w.icon} ${w.name}`, cardWidth - 4).padEnd(cardWidth - 4)}${side}`;
+        const nameLine = `${side}  ${truncate(`${w.icon} ${w.name}`, cardWidth - 4).padEnd(cardWidth - 4)}${side}`;
         const descLine = `${side}  ${truncate(w.description, cardWidth - 4).padEnd(cardWidth - 4)}${side}`;
 
         cards.push(topBorder);
@@ -1594,7 +1595,25 @@ async function main() {
         }
       }
 
-      detailsUrl.content = cards.join("\n");
+      const panelHeight = detailsPanel.height || 20;
+      const rawVisibleLines = Math.max(cardStride, panelHeight - 5);
+      const visibleLines = Math.max(
+        cardStride,
+        Math.floor(rawVisibleLines / cardStride) * cardStride,
+      );
+      const selectedWidgetStartLine = widgetPickerIndex * cardStride;
+      const selectedWidgetEndLine = selectedWidgetStartLine + (cardStride - 1);
+
+      if (selectedWidgetStartLine < widgetPickerScrollOffset) {
+        widgetPickerScrollOffset = selectedWidgetStartLine;
+      } else if (selectedWidgetEndLine >= widgetPickerScrollOffset + visibleLines) {
+        widgetPickerScrollOffset = selectedWidgetEndLine - visibleLines + 1;
+      }
+
+      const maxScroll = Math.max(0, cards.length - visibleLines);
+      widgetPickerScrollOffset = Math.max(0, Math.min(widgetPickerScrollOffset, maxScroll));
+
+      detailsUrl.content = cards.slice(widgetPickerScrollOffset, widgetPickerScrollOffset + visibleLines).join("\n");
       detailsUrl.fg = COLORS.text;
 
       detailsHealth.content = "";
@@ -1723,7 +1742,7 @@ async function main() {
       detailsDisk.fg = COLORS.text;
       detailsWidgetContent.content = "";
 
-      footerText.content = "n new service • w widgets • s settings • f search • t toggle view • r refresh • Ctrl+C quit";
+      footerText.content = "n new service • w widgets • s settings • f search • t toggle view • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
 
@@ -1761,7 +1780,7 @@ async function main() {
         const widgetContent = renderWidgetDetail(selectedIndex, pw);
         detailsWidgetContent.content = widgetContent ? "\n" + widgetContent : "";
 
-        footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • w widgets • e edit • d delete • r refresh • Ctrl+C quit`;
+        footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • w widgets • e edit • d delete • Ctrl+C quit`;
       } else {
         const selectedHealth = health[selectedIndex];
         const selectedRuntime = runtimeStats[selectedIndex];
@@ -1842,7 +1861,7 @@ async function main() {
 
         detailsWidgetContent.content = "";
 
-        footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • w widgets • Enter open • e edit • d delete • r refresh • Ctrl+C quit`;
+        footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • w widgets • Enter open • e edit • d delete • Ctrl+C quit`;
       }
     }
   };
@@ -2065,13 +2084,6 @@ async function main() {
   const exitGracefully = () => {
     stop();
     process.exit(0);
-  };
-
-  const failFast = (error: unknown, context: string): never => {
-    const message = error instanceof Error ? error.message : String(error);
-    stop();
-    console.error(`homestat ${context}: ${message}`);
-    process.exit(1);
   };
 
   const isTextField = (index: number): boolean => index === 0 || index === 1 || index === 2 || index === 3;
@@ -2340,6 +2352,7 @@ async function main() {
       if (event.name === "escape") {
         isWidgetPickerActive = false;
         widgetPickerIndex = 0;
+        widgetPickerScrollOffset = 0;
         safeRender();
         event.preventDefault();
         return;
@@ -2648,6 +2661,7 @@ async function main() {
       isSearchMode = false;
       isWidgetPickerActive = true;
       widgetPickerIndex = 0;
+      widgetPickerScrollOffset = 0;
       safeRender();
       event.preventDefault();
       return;
@@ -2697,12 +2711,6 @@ async function main() {
       return;
     }
 
-
-    if ((event.sequence === "r" || event.name === "r") && !event.ctrl && !event.meta) {
-      void refreshHealth(true).catch((error) => failFast(error, "manual refresh failure"));
-      event.preventDefault();
-      return;
-    }
 
   });
 
