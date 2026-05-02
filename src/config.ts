@@ -8,7 +8,8 @@ export const HOMESTAT_DIR = dirname(CONFIG_PATH);
 
 export const DEFAULT_GLOBAL_SETTINGS: GlobalSettings = {
   autoRefreshEnabled: true,
-  autoRefreshIntervalSec: 30,
+  autoRefreshIntervalSec: 10,
+  selectedAutoRefreshIntervalSec: 1,
   autoRefreshDockerDiscovery: false,
   refreshOnStart: true,
 };
@@ -87,6 +88,14 @@ function assertConfig(data: unknown): asserts data is { services: unknown[]; set
     throw new Error("Config settings has an invalid autoRefreshIntervalSec value; expected a positive number.");
   }
 
+  const selectedAutoRefreshIntervalSec = (settings as { selectedAutoRefreshIntervalSec?: unknown }).selectedAutoRefreshIntervalSec;
+  if (
+    selectedAutoRefreshIntervalSec !== undefined &&
+    (typeof selectedAutoRefreshIntervalSec !== "number" || !Number.isFinite(selectedAutoRefreshIntervalSec) || selectedAutoRefreshIntervalSec <= 0)
+  ) {
+    throw new Error("Config settings has an invalid selectedAutoRefreshIntervalSec value; expected a positive number.");
+  }
+
   const autoRefreshDockerDiscovery = (settings as { autoRefreshDockerDiscovery?: unknown }).autoRefreshDockerDiscovery;
   if (autoRefreshDockerDiscovery !== undefined && typeof autoRefreshDockerDiscovery !== "boolean") {
     throw new Error("Config settings has an invalid autoRefreshDockerDiscovery value; expected a boolean.");
@@ -105,6 +114,10 @@ function mergeGlobalSettings(settings?: Partial<GlobalSettings>): GlobalSettings
     autoRefreshIntervalSec: Math.max(
       1,
       Math.round(settings?.autoRefreshIntervalSec ?? DEFAULT_GLOBAL_SETTINGS.autoRefreshIntervalSec),
+    ),
+    selectedAutoRefreshIntervalSec: Math.max(
+      1,
+      Math.round(settings?.selectedAutoRefreshIntervalSec ?? DEFAULT_GLOBAL_SETTINGS.selectedAutoRefreshIntervalSec),
     ),
   };
 }

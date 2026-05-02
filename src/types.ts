@@ -16,6 +16,7 @@ export interface Service {
 export interface GlobalSettings {
   autoRefreshEnabled: boolean;
   autoRefreshIntervalSec: number;
+  selectedAutoRefreshIntervalSec: number;
   autoRefreshDockerDiscovery: boolean;
   refreshOnStart: boolean;
 }

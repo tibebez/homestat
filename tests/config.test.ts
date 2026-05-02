@@ -79,7 +79,8 @@ test("applies default global settings when settings are missing", async () => {
     async (path) => {
       const config = await loadConfig(path);
       expect(config.settings.autoRefreshEnabled).toBe(true);
-      expect(config.settings.autoRefreshIntervalSec).toBe(30);
+      expect(config.settings.autoRefreshIntervalSec).toBe(10);
+      expect(config.settings.selectedAutoRefreshIntervalSec).toBe(1);
       expect(config.settings.autoRefreshDockerDiscovery).toBe(false);
       expect(config.settings.refreshOnStart).toBe(true);
     },
@@ -92,6 +93,7 @@ test("accepts valid global settings", async () => {
       settings: {
         autoRefreshEnabled: false,
         autoRefreshIntervalSec: 10,
+        selectedAutoRefreshIntervalSec: 5,
         autoRefreshDockerDiscovery: true,
         refreshOnStart: false,
       },
@@ -101,6 +103,7 @@ test("accepts valid global settings", async () => {
       const config = await loadConfig(path);
       expect(config.settings.autoRefreshEnabled).toBe(false);
       expect(config.settings.autoRefreshIntervalSec).toBe(10);
+      expect(config.settings.selectedAutoRefreshIntervalSec).toBe(5);
       expect(config.settings.autoRefreshDockerDiscovery).toBe(true);
       expect(config.settings.refreshOnStart).toBe(false);
     },

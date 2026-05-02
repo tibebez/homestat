@@ -792,6 +792,7 @@ async function main() {
   const settingsFormFields = {
     autoRefreshEnabled: globalSettings.autoRefreshEnabled,
     autoRefreshIntervalSec: String(globalSettings.autoRefreshIntervalSec),
+    selectedAutoRefreshIntervalSec: String(globalSettings.selectedAutoRefreshIntervalSec),
     autoRefreshDockerDiscovery: globalSettings.autoRefreshDockerDiscovery,
     refreshOnStart: globalSettings.refreshOnStart,
   };
@@ -805,6 +806,7 @@ async function main() {
   function resetSettingsForm(): void {
     settingsFormFields.autoRefreshEnabled = globalSettings.autoRefreshEnabled;
     settingsFormFields.autoRefreshIntervalSec = String(globalSettings.autoRefreshIntervalSec);
+    settingsFormFields.selectedAutoRefreshIntervalSec = String(globalSettings.selectedAutoRefreshIntervalSec);
     settingsFormFields.autoRefreshDockerDiscovery = globalSettings.autoRefreshDockerDiscovery;
     settingsFormFields.refreshOnStart = globalSettings.refreshOnStart;
     settingsFocusedFieldIndex = 0;
@@ -826,12 +828,12 @@ async function main() {
       return;
     }
 
-    if (settingsFocusedFieldIndex === 2) {
+    if (settingsFocusedFieldIndex === 3) {
       settingsFormFields.autoRefreshDockerDiscovery = direction > 0 ? true : false;
       return;
     }
 
-    if (settingsFocusedFieldIndex === 3) {
+    if (settingsFocusedFieldIndex === 4) {
       settingsFormFields.refreshOnStart = direction > 0 ? true : false;
     }
   }
@@ -841,12 +843,12 @@ async function main() {
   }
 
   function nextSettingsField(): void {
-    const max = 4;
+    const max = 5;
     settingsFocusedFieldIndex = (settingsFocusedFieldIndex + 1) % (max + 1);
   }
 
   function prevSettingsField(): void {
-    const max = 4;
+    const max = 5;
     settingsFocusedFieldIndex = (settingsFocusedFieldIndex - 1 + max + 1) % (max + 1);
   }
 
@@ -865,10 +867,19 @@ async function main() {
         return;
       }
 
+      const parsedSelectedInterval = Number(settingsFormFields.selectedAutoRefreshIntervalSec.trim());
+      if (!Number.isFinite(parsedSelectedInterval) || parsedSelectedInterval <= 0) {
+        settingsFormError = "Error: Selected service interval must be a positive number of seconds.";
+        safeRender();
+        return;
+      }
+
       const roundedInterval = Math.max(1, Math.round(parsedInterval));
+      const roundedSelectedInterval = Math.max(1, Math.round(parsedSelectedInterval));
 
       globalSettings.autoRefreshEnabled = settingsFormFields.autoRefreshEnabled;
       globalSettings.autoRefreshIntervalSec = roundedInterval;
+      globalSettings.selectedAutoRefreshIntervalSec = roundedSelectedInterval;
       globalSettings.autoRefreshDockerDiscovery = settingsFormFields.autoRefreshDockerDiscovery;
       globalSettings.refreshOnStart = settingsFormFields.refreshOnStart;
 
@@ -1226,9 +1237,10 @@ async function main() {
       const FIELDS = {
         autoRefreshEnabled: 0,
         autoRefreshIntervalSec: 1,
-        autoRefreshDockerDiscovery: 2,
-        refreshOnStart: 3,
-        save: 4,
+        selectedAutoRefreshIntervalSec: 2,
+        autoRefreshDockerDiscovery: 3,
+        refreshOnStart: 4,
+        save: 5,
       };
 
       detailsTitle.content = "";
@@ -1252,26 +1264,33 @@ async function main() {
       );
       detailsHealth.fg = intervalFocused ? COLORS.focused : COLORS.text;
 
-      const dockerDiscoveryFocused = settingsFocusedFieldIndex === FIELDS.autoRefreshDockerDiscovery;
+      const selectedIntervalFocused = settingsFocusedFieldIndex === FIELDS.selectedAutoRefreshIntervalSec;
       detailsChecked.content = settingsFieldLine(
+        "Selected svc sec",
+        settingsFormFields.selectedAutoRefreshIntervalSec,
+        selectedIntervalFocused,
+        pw,
+      );
+      detailsChecked.fg = selectedIntervalFocused ? COLORS.focused : COLORS.text;
+
+      const dockerDiscoveryFocused = settingsFocusedFieldIndex === FIELDS.autoRefreshDockerDiscovery;
+      detailsError.content = settingsFieldLine(
         "Auto Docker scan",
         `${settingsToggleLabel(settingsFormFields.autoRefreshDockerDiscovery)} (←/→)`,
         dockerDiscoveryFocused,
         pw,
       );
-      detailsChecked.fg = dockerDiscoveryFocused ? COLORS.focused : COLORS.text;
+      detailsError.fg = dockerDiscoveryFocused ? COLORS.focused : COLORS.text;
 
       const refreshOnStartFocused = settingsFocusedFieldIndex === FIELDS.refreshOnStart;
-      detailsError.content = settingsFieldLine(
+      detailsRuntime.content = settingsFieldLine(
         "Refresh on start",
         `${settingsToggleLabel(settingsFormFields.refreshOnStart)} (←/→)`,
         refreshOnStartFocused,
         pw,
       );
-      detailsError.fg = refreshOnStartFocused ? COLORS.focused : COLORS.text;
+      detailsRuntime.fg = refreshOnStartFocused ? COLORS.focused : COLORS.text;
 
-      detailsRuntime.content = "";
-      detailsRuntime.fg = COLORS.text;
       detailsCpu.content = "";
       detailsCpu.fg = COLORS.text;
 
@@ -1643,21 +1662,36 @@ async function main() {
     safeRender();
   };
 
-  let healthInterval: ReturnType<typeof setInterval> | null = null;
+  let healthTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  function configureHealthInterval(): void {
-    if (healthInterval) {
-      clearInterval(healthInterval);
-      healthInterval = null;
+  function getCurrentRefreshIntervalMs(): number {
+    if (!globalSettings.autoRefreshEnabled) {
+      return 0;
     }
 
-    if (!globalSettings.autoRefreshEnabled) {
+    const isServiceView = !isSettingsFormActive && !isFormActive && !isSearchMode && services.length > 0;
+    if (isServiceView) {
+      return Math.max(1_000, globalSettings.selectedAutoRefreshIntervalSec * 1_000);
+    }
+
+    return Math.max(1_000, globalSettings.autoRefreshIntervalSec * 1_000);
+  }
+
+  function configureHealthInterval(): void {
+    if (healthTimeout) {
+      clearTimeout(healthTimeout);
+      healthTimeout = null;
+    }
+
+    const intervalMs = getCurrentRefreshIntervalMs();
+    if (intervalMs === 0) {
       return;
     }
 
-    const intervalMs = Math.max(1_000, globalSettings.autoRefreshIntervalSec * 1_000);
-    healthInterval = setInterval(() => {
-      void refreshHealth(globalSettings.autoRefreshDockerDiscovery);
+    healthTimeout = setTimeout(() => {
+      void refreshHealth(globalSettings.autoRefreshDockerDiscovery)
+        .then(() => configureHealthInterval())
+        .catch(() => configureHealthInterval());
     }, intervalMs);
   }
 
@@ -1677,9 +1711,9 @@ async function main() {
       return;
     }
     stopped = true;
-    if (healthInterval) {
-      clearInterval(healthInterval);
-      healthInterval = null;
+    if (healthTimeout) {
+      clearTimeout(healthTimeout);
+      healthTimeout = null;
     }
     clearInterval(relativeInterval);
     renderer.destroy();
@@ -1794,10 +1828,10 @@ async function main() {
         if (settingsFocusedFieldIndex === 0) {
           settingsFormFields.autoRefreshEnabled = !settingsFormFields.autoRefreshEnabled;
           safeRender();
-        } else if (settingsFocusedFieldIndex === 2) {
+        } else if (settingsFocusedFieldIndex === 3) {
           settingsFormFields.autoRefreshDockerDiscovery = !settingsFormFields.autoRefreshDockerDiscovery;
           safeRender();
-        } else if (settingsFocusedFieldIndex === 3) {
+        } else if (settingsFocusedFieldIndex === 4) {
           settingsFormFields.refreshOnStart = !settingsFormFields.refreshOnStart;
           safeRender();
         }
@@ -1806,13 +1840,13 @@ async function main() {
       }
 
       if (event.name === "return" || event.name === "enter") {
-        if (settingsFocusedFieldIndex === 4) {
+        if (settingsFocusedFieldIndex === 5) {
           void submitSettingsForm();
           event.preventDefault();
           return;
         }
 
-        if (settingsFocusedFieldIndex === 0 || settingsFocusedFieldIndex === 2 || settingsFocusedFieldIndex === 3) {
+        if (settingsFocusedFieldIndex === 0 || settingsFocusedFieldIndex === 3 || settingsFocusedFieldIndex === 4) {
           toggleFocusedSettingBoolean(1);
           safeRender();
           event.preventDefault();
@@ -1827,6 +1861,13 @@ async function main() {
         return;
       }
 
+      if (settingsFocusedFieldIndex === 2 && event.name === "backspace") {
+        settingsFormFields.selectedAutoRefreshIntervalSec = settingsFormFields.selectedAutoRefreshIntervalSec.slice(0, -1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
       if (
         settingsFocusedFieldIndex === 1 &&
         event.sequence &&
@@ -1835,6 +1876,19 @@ async function main() {
         /^[0-9]$/.test(event.sequence)
       ) {
         settingsFormFields.autoRefreshIntervalSec += event.sequence;
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (
+        settingsFocusedFieldIndex === 2 &&
+        event.sequence &&
+        !event.ctrl &&
+        !event.meta &&
+        /^[0-9]$/.test(event.sequence)
+      ) {
+        settingsFormFields.selectedAutoRefreshIntervalSec += event.sequence;
         safeRender();
         event.preventDefault();
         return;
@@ -2123,6 +2177,16 @@ async function main() {
       const pasted = textDecoder.decode(event.bytes).replace(/\D+/g, "");
       if (pasted) {
         settingsFormFields.autoRefreshIntervalSec += pasted;
+        safeRender();
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (isSettingsFormActive && settingsFocusedFieldIndex === 2) {
+      const pasted = textDecoder.decode(event.bytes).replace(/\D+/g, "");
+      if (pasted) {
+        settingsFormFields.selectedAutoRefreshIntervalSec += pasted;
         safeRender();
       }
       event.preventDefault();
