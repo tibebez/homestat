@@ -69,6 +69,27 @@ function capitalizeFirstLetter(value: string): string {
   return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
 }
 
+function fuzzyMatchService(query: string, service: Service): boolean {
+  if (!query.trim()) return true;
+  const q = query.toLowerCase();
+  const haystack = [
+    service.name,
+    service.url,
+    service.group || "",
+    service.description || "",
+    service.containerName || "",
+    service.containerId || "",
+  ].join(" ").toLowerCase();
+
+  let idx = 0;
+  for (const char of q) {
+    const found = haystack.indexOf(char, idx);
+    if (found === -1) return false;
+    idx = found + 1;
+  }
+  return true;
+}
+
 function formFieldLine(
   label: string,
   value: string,
@@ -591,6 +612,13 @@ async function main() {
   servicesPanel.add(cardsViewport);
   cardsViewport.add(cardsGrid);
 
+  const searchEmptyState = new TextRenderable(renderer, {
+    id: "search-empty-state",
+    content: "",
+    fg: COLORS.muted,
+  });
+  cardsViewport.add(searchEmptyState);
+
   detailsPanel.add(detailsTitle);
   detailsPanel.add(detailsUrl);
   detailsPanel.add(detailsHealth);
@@ -665,6 +693,16 @@ async function main() {
   }
 
   function getActiveServiceIndexes(): number[] {
+    if (isSearchMode) {
+      if (!searchQuery.trim()) {
+        return services.map((_, i) => i);
+      }
+      return services
+        .map((service, index) => ({ service, index }))
+        .filter(({ service }) => fuzzyMatchService(searchQuery, service))
+        .map(({ index }) => index);
+    }
+
     normalizeView();
 
     const ordered = getServicesForView(services, currentView);
@@ -760,6 +798,9 @@ async function main() {
   let settingsFocusedFieldIndex = 0;
   let settingsFormError = "";
   let isSettingsSubmitting = false;
+
+  let isSearchMode = false;
+  let searchQuery = "";
 
   function resetSettingsForm(): void {
     settingsFormFields.autoRefreshEnabled = globalSettings.autoRefreshEnabled;
@@ -1095,6 +1136,10 @@ async function main() {
     ensureSelectionWithinActive(activeServiceIndexes);
     servicesPanel.title = getCurrentServicesPanelTitle();
 
+    if (isSearchMode) {
+      servicesPanel.title = `Search: ${searchQuery || "..."}`;
+    }
+
     for (const [slotIndex, row] of rowTexts.entries()) {
       const serviceIndex = activeServiceIndexes[slotIndex];
 
@@ -1136,6 +1181,12 @@ async function main() {
 
       row.borderStyle = focused ? "double" : "single";
       row.borderColor = focused ? COLORS.cardBorderFocused : COLORS.cardBorder;
+    }
+
+    if (isSearchMode && activeServiceIndexes.length === 0) {
+      searchEmptyState.content = `No services found for "${searchQuery}"\nPress Enter to search Google`;
+    } else {
+      searchEmptyState.content = "";
     }
 
     const activeSelectedPosition = activeServiceIndexes.indexOf(selectedIndex);
@@ -1292,6 +1343,37 @@ async function main() {
       detailsDisk.fg = COLORS.text;
 
       footerText.content = "↑/↓ fields • ←/→ group/icon presets • Type/paste name/url/group/icon/container • Enter save • Esc cancel";
+    } else if (isSearchMode) {
+      detailsPanel.title = "Search";
+
+      detailsTitle.content = "🔍 Search Services";
+      detailsTitle.fg = COLORS.focused;
+
+      detailsUrl.content = formFieldLine("Query", searchQuery, true, pw);
+      detailsUrl.fg = COLORS.focused;
+
+      detailsHealth.content = "";
+      detailsHealth.fg = COLORS.text;
+
+      detailsChecked.content = "";
+      detailsChecked.fg = COLORS.text;
+
+      detailsError.content = "";
+      detailsError.fg = COLORS.text;
+
+      detailsRuntime.content = "";
+      detailsRuntime.fg = COLORS.text;
+
+      detailsCpu.content = "";
+      detailsCpu.fg = COLORS.text;
+
+      detailsRam.content = "";
+      detailsRam.fg = COLORS.text;
+
+      detailsDisk.content = "";
+      detailsDisk.fg = COLORS.text;
+
+      footerText.content = "Type to fuzzy search • Enter Google search • Esc cancel";
     } else if (activeServiceIndexes.length === 0) {
       detailsPanel.title = "Details";
 
@@ -1319,7 +1401,7 @@ async function main() {
       detailsDisk.content = "";
       detailsDisk.fg = COLORS.text;
 
-      footerText.content = "n new service • s settings • t toggle view • r refresh • Ctrl+C quit";
+      footerText.content = "n new service • s settings • f search • t toggle view • r refresh • Ctrl+C quit";
     } else {
       const selected = services[selectedIndex];
       const selectedHealth = health[selectedIndex];
@@ -1411,7 +1493,7 @@ async function main() {
       }
 
 
-      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • Enter open • e edit • d delete • r refresh • Ctrl+C quit`;
+      footerText.content = `←/→/↑/↓ navigate • t toggle view • n new • s settings • f search • Enter open • e edit • d delete • r refresh • Ctrl+C quit`;
     }
   };
 
@@ -1863,6 +1945,75 @@ async function main() {
       return;
     }
 
+    if (isSearchMode) {
+      if (event.name === "escape") {
+        isSearchMode = false;
+        searchQuery = "";
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "return" || event.name === "enter") {
+        const query = searchQuery.trim();
+        if (query) {
+          void open(`https://www.google.com/search?q=${encodeURIComponent(query)}`);
+        }
+        isSearchMode = false;
+        searchQuery = "";
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "backspace") {
+        searchQuery = searchQuery.slice(0, -1);
+        ensureSelectionWithinActive(getActiveServiceIndexes());
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "left") {
+        moveSelection(-1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "right") {
+        moveSelection(1);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "up") {
+        moveSelection(-CARD_COLUMNS);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.name === "down") {
+        moveSelection(CARD_COLUMNS);
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      if (event.sequence && !event.ctrl && !event.meta && !/[\x00-\x1F\x7F]/.test(event.sequence)) {
+        searchQuery += event.sequence;
+        ensureSelectionWithinActive(getActiveServiceIndexes());
+        safeRender();
+        event.preventDefault();
+        return;
+      }
+
+      event.preventDefault();
+      return;
+    }
+
     if (event.name === "left") {
       moveSelection(-1);
       safeRender();
@@ -1915,6 +2066,16 @@ async function main() {
       return;
     }
 
+    if ((event.sequence === "f" || event.name === "f") && !event.ctrl && !event.meta) {
+      isSearchMode = true;
+      searchQuery = "";
+      currentView = { kind: "all" };
+      ensureSelectionWithinActive(getActiveServiceIndexes());
+      safeRender();
+      event.preventDefault();
+      return;
+    }
+
     if (event.name === "return" || event.name === "enter") {
       const active = getActiveServiceIndexes();
       if (active.length > 0) {
@@ -1962,6 +2123,17 @@ async function main() {
       const pasted = textDecoder.decode(event.bytes).replace(/\D+/g, "");
       if (pasted) {
         settingsFormFields.autoRefreshIntervalSec += pasted;
+        safeRender();
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (isSearchMode) {
+      const pasted = textDecoder.decode(event.bytes).replace(/[\r\n]+/g, "");
+      if (pasted) {
+        searchQuery += pasted;
+        ensureSelectionWithinActive(getActiveServiceIndexes());
         safeRender();
       }
       event.preventDefault();
